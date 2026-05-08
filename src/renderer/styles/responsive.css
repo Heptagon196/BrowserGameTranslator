@@ -1,0 +1,84 @@
+﻿@media (max-width: 1180px) {
+  .model-config-list {
+    padding-bottom: 8px;
+  }
+
+  .model-config-row {
+    flex-basis: 200px;
+  }
+
+  .field-row,
+  .provider-model-advanced .field-row {
+    grid-template-columns: 1fr;
+  }
+
+  .prompt-header {
+    flex-direction: column;
+  }
+
+  .settings-shell {
+    grid-template-columns: 190px minmax(0, 1fr);
+  }
+
+  .prompt-config-layout {
+    grid-template-columns: 230px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 920px) {
+  .form-grid,
+  .metric-grid,
+  .project-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .prompt-config-layout {
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+
+  .prompt-list {
+    max-height: 220px;
+  }
+
+  .prompt-editor textarea {
+    min-height: 320px;
+  }
+
+  .settings-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-nav {
+    align-self: stretch;
+    position: static;
+  }
+
+  .topbar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .topbar-actions,
+  .search-box {
+    width: 100%;
+  }
+
+  .workflow-actions,
+  .export-inline {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .export-inline .styled-select-trigger {
+    width: 100%;
+  }
+}
+
+@media (max-width: 520px) {
+  .permission-select {
+    flex: 1 1 auto;
+    width: auto;
+  }
+}

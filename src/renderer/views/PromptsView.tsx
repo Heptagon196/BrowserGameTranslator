@@ -1,0 +1,139 @@
+import { useEffect, useState } from "react";
+import { Save } from "lucide-react";
+import type { AppStateSnapshot, PromptConfig, PromptScope } from "../../shared/types";
+
+type TextPromptKey = Exclude<keyof PromptConfig, "translationRules">;
+type PromptEditorKey = TextPromptKey | "translationRules";
+
+const promptFields: Array<{ key: PromptEditorKey; title: string; description: string }> = [
+  {
+    key: "connectionTestSystem",
+    title: "连接测试",
+    description: "测试 API Key 和模型是否可用时发送给 AI 的提示词。"
+  },
+  {
+    key: "analysisSystem",
+    title: "分析",
+    description: "AI 提取人名、术语和禁翻项时使用的提示词。"
+  },
+  {
+    key: "aiLocalizationPlanSystem",
+    title: "AI 提取/回填方案",
+    description: "让 AI 根据本地游戏结构生成特化提取/回填方案时使用的提示词。"
+  },
+  {
+    key: "translationSystem",
+    title: "翻译",
+    description: "批量翻译时使用的提示词，约束 AI 按逐行 textarea 结构输出译文。"
+  },
+  {
+    key: "translationRules",
+    title: "翻译规则",
+    description: "每行一条，会作为 userRules 发送给翻译任务。适合写固定术语、文风和禁翻要求。"
+  }
+];
+
+export default function PromptsView({
+  snapshot,
+  run
+}: {
+  snapshot: AppStateSnapshot;
+  run: <T>(message: string, task: () => Promise<T>, onDone?: (value: T) => void) => Promise<T | undefined>;
+}) {
+  const defaultScope: PromptScope = snapshot.project ? "workspace" : "global";
+  const [scope, setScope] = useState<PromptScope>(defaultScope);
+  const [prompts, setPrompts] = useState<PromptConfig | null>(null);
+  const [selectedPromptKey, setSelectedPromptKey] = useState<PromptEditorKey>(() => {
+    const saved = localStorage.getItem("bgt.selectedPromptKey");
+    return promptFields.some((field) => field.key === saved) ? (saved as PromptEditorKey) : promptFields[0].key;
+  });
+  const selectedPromptField = promptFields.find((field) => field.key === selectedPromptKey) ?? promptFields[0];
+
+  useEffect(() => {
+    setScope(snapshot.project ? "workspace" : "global");
+  }, [snapshot.project?.projectRoot]);
+
+  useEffect(() => {
+    void run("读取提示词", () => window.bgt.loadPrompts(scope), setPrompts);
+  }, [scope, snapshot.project?.projectRoot]);
+
+  useEffect(() => {
+    localStorage.setItem("bgt.selectedPromptKey", selectedPromptKey);
+  }, [selectedPromptKey]);
+
+  const updatePrompt = (key: TextPromptKey, value: string) => {
+    setPrompts((current) => (current ? { ...current, [key]: value } : current));
+  };
+
+  const updateTranslationRules = (value: string) => {
+    setPrompts((current) => (current ? { ...current, translationRules: value.split(/\r?\n/).map((rule) => rule.trim()).filter(Boolean) } : current));
+  };
+
+  return (
+    <div className="stack">
+      <div className="panel">
+        <div className="prompt-header">
+          <div>
+            <h2>提示词配置</h2>
+            <p>{scope === "workspace" ? "当前编辑工作区提示词。工作区提示词会优先用于当前项目。" : "当前编辑全局提示词。没有工作区提示词时会使用这里的配置。"}</p>
+          </div>
+        </div>
+        {!snapshot.project && <p className="settings-note">当前没有打开项目，因此只能编辑全局提示词。</p>}
+        <div className="button-row prompt-save-row">
+          <button disabled={!prompts} onClick={() => prompts && run("保存提示词", () => window.bgt.savePrompts(scope, prompts), setPrompts)}>
+            <Save size={16} />
+            保存提示词
+          </button>
+        </div>
+      </div>
+      {prompts ? (
+        <div className="panel prompt-config-layout">
+          <div className="prompt-config-toolbar">
+            <div className="segmented">
+              <button className={scope === "global" ? "active" : ""} onClick={() => setScope("global")}>
+                全局提示词
+              </button>
+              <button disabled={!snapshot.project} className={scope === "workspace" ? "active" : ""} onClick={() => setScope("workspace")}>
+                当前工作区提示词
+              </button>
+            </div>
+          </div>
+          <div className="prompt-list" aria-label="提示词列表">
+            {promptFields.map((field) => (
+              <button
+                key={field.key}
+                className={field.key === selectedPromptKey ? "prompt-list-row active" : "prompt-list-row"}
+                onClick={() => setSelectedPromptKey(field.key)}
+              >
+                <strong>{field.title}</strong>
+                <span>{field.description}</span>
+              </button>
+            ))}
+          </div>
+          <div className="prompt-editor">
+            <div className="prompt-editor-heading">
+              <div>
+                <h2>{selectedPromptField.title}</h2>
+                <p>{selectedPromptField.description}</p>
+              </div>
+              <span>{scope === "workspace" ? "工作区" : "全局"}</span>
+            </div>
+            <textarea
+              value={selectedPromptKey === "translationRules" ? prompts.translationRules.join("\n") : prompts[selectedPromptKey]}
+              onChange={(event) => {
+                if (selectedPromptKey === "translationRules") updateTranslationRules(event.target.value);
+                else updatePrompt(selectedPromptKey, event.target.value);
+              }}
+            />
+            {selectedPromptKey === "translationRules" && <p className="settings-note">每行保存为一条独立规则，空行会被忽略。</p>}
+          </div>
+        </div>
+      ) : (
+        <div className="panel empty-state">
+          <h2>正在读取提示词</h2>
+          <p>如果没有全局或工作区配置，会显示软件内置默认提示词。</p>
+        </div>
+      )}
+    </div>
+  );
+}
