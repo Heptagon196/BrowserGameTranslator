@@ -166,7 +166,7 @@ export default function ImportExportView({
         onTranslateItems={
           provider && snapshot.project
             ? async (selectedItems) => {
-                const translated = await window.bgt.translateBatch(provider, snapshot.project!.targetLanguage, [], selectedItems);
+                const translated = await window.bgt.translateBatch(provider, snapshot.project!.targetLanguage, selectedItems);
                 const byId = new Map(translated.map((item) => [item.id, item]));
                 await saveItems(snapshot.textItems.map((item) => byId.get(item.id) ?? item));
               }

@@ -5,11 +5,13 @@ import * as RadixProgress from "@radix-ui/react-progress";
 import * as RadixSelect from "@radix-ui/react-select";
 import * as Switch from "@radix-ui/react-switch";
 import * as RadixTooltip from "@radix-ui/react-tooltip";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronUp, X } from "lucide-react";
 
 export type StyledSelectOption = {
   value: string;
   label: string;
+  description?: string;
+  title?: string;
   disabled?: boolean;
 };
 
@@ -26,10 +28,11 @@ export function StyledSelect({
   disabled?: boolean;
   onChange: (value: string) => void;
 }) {
+  const selectedOption = options.find((option) => option.value === value);
   return (
     <RadixSelect.Root value={value} disabled={disabled} onValueChange={onChange}>
       <RadixSelect.Trigger className={className ? `styled-select-trigger ${className}` : "styled-select-trigger"}>
-        <RadixSelect.Value />
+        <span className="styled-select-trigger-label">{selectedOption?.label ?? value}</span>
         <RadixSelect.Icon className="styled-select-icon">
           <ChevronDown size={17} strokeWidth={2.4} />
         </RadixSelect.Icon>
@@ -41,8 +44,18 @@ export function StyledSelect({
           </RadixSelect.ScrollUpButton>
           <RadixSelect.Viewport className="styled-select-viewport">
             {options.map((option) => (
-              <RadixSelect.Item className="styled-select-item" disabled={option.disabled} key={option.value} value={option.value}>
-                <RadixSelect.ItemText>{option.label}</RadixSelect.ItemText>
+              <RadixSelect.Item
+                className={option.description ? "styled-select-item has-description" : "styled-select-item"}
+                disabled={option.disabled}
+                key={option.value}
+                textValue={option.label}
+                title={option.title ?? option.description}
+                value={option.value}
+              >
+                <RadixSelect.ItemText>
+                  <span className="styled-select-item-label">{option.label}</span>
+                  {option.description ? <span className="styled-select-item-description">{option.description}</span> : null}
+                </RadixSelect.ItemText>
               </RadixSelect.Item>
             ))}
           </RadixSelect.Viewport>
@@ -61,6 +74,7 @@ export function AppDialog({
   description,
   compact = false,
   className,
+  disableOutsideClose = false,
   children,
   onOpenChange
 }: {
@@ -69,6 +83,7 @@ export function AppDialog({
   description?: string;
   compact?: boolean;
   className?: string;
+  disableOutsideClose?: boolean;
   children: React.ReactNode;
   onOpenChange?: (open: boolean) => void;
 }) {
@@ -76,7 +91,16 @@ export function AppDialog({
     <RadixDialog.Root open={open} onOpenChange={onOpenChange}>
       <RadixDialog.Portal>
         <RadixDialog.Overlay className="modal-backdrop" />
-        <RadixDialog.Content className={`modal${compact ? " compact-modal" : ""}${className ? ` ${className}` : ""}`}>
+        <RadixDialog.Content
+          className={`modal${compact ? " compact-modal" : ""}${className ? ` ${className}` : ""}`}
+          onInteractOutside={disableOutsideClose ? (event) => event.preventDefault() : undefined}
+          onPointerDownOutside={disableOutsideClose ? (event) => event.preventDefault() : undefined}
+        >
+          {onOpenChange ? (
+            <RadixDialog.Close className="modal-close-button" aria-label="关闭">
+              <X size={18} />
+            </RadixDialog.Close>
+          ) : null}
           <RadixDialog.Title asChild>
             <h2>{title}</h2>
           </RadixDialog.Title>

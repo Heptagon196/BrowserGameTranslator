@@ -14,7 +14,7 @@ import {
   writeJsonl
 } from "./storage";
 import { loadActiveChatProviderId, loadActiveProviderId, loadProviders, saveActiveChatProviderId, saveActiveProviderId, saveProviders } from "./credentialService";
-import { loadEffectivePrompts, loadPrompts, savePrompts } from "./promptService";
+import { loadDefaultPrompts, loadEffectivePrompts, loadPrompts, savePrompts } from "./promptService";
 import { loadRecentProjects, recordRecentProject } from "./recentProjects";
 
 export class ProjectService {
@@ -69,8 +69,9 @@ export class ProjectService {
   async openProjectDirectory(directory: string) {
     const projectFile = path.join(path.resolve(directory), ".bgt", "project.json");
     const storedProject = await readJson<ProjectConfig | null>(projectFile, null);
-    if (!storedProject?.projectRoot) throw new Error("Selected folder is not a BrowserGameTranslator project.");
+    if (!storedProject || storedProject.schemaVersion !== 1 || !storedProject.projectName) return null;
     const sanitizedProject = this.sanitizeProject(this.resolveStoredProject(storedProject, projectFile));
+    await ensureProjectDirs(sanitizedProject);
     this.currentProject = sanitizedProject;
     await this.writeProjectConfig(sanitizedProject);
     await recordRecentProject(sanitizedProject);
@@ -81,6 +82,7 @@ export class ProjectService {
     const storedProject = await readJson<ProjectConfig | null>(projectPath, null);
     if (!storedProject?.projectRoot) throw new Error("Selected recent project is not valid.");
     const sanitizedProject = this.sanitizeProject(this.resolveStoredProject(storedProject, projectPath));
+    await ensureProjectDirs(sanitizedProject);
     this.currentProject = sanitizedProject;
     await this.writeProjectConfig(sanitizedProject);
     await recordRecentProject(sanitizedProject);
@@ -145,6 +147,10 @@ export class ProjectService {
 
   async loadEffectivePrompts() {
     return loadEffectivePrompts(this.currentProject ?? undefined);
+  }
+
+  async loadDefaultPrompts() {
+    return loadDefaultPrompts();
   }
 
   async loadProviderSettings() {

@@ -13,6 +13,7 @@ export type CommandSelectOption = {
   id: string;
   label: string;
   description?: string;
+  tooltip?: string;
 };
 
 type FloatingSelectPlacement = "top" | "bottom";
@@ -114,6 +115,7 @@ export function CommandSelect({
                   value={`${option.label} ${option.description ?? ""} ${option.id}`}
                   onSelect={() => pick(option.id)}
                   className="command-select-item"
+                  title={option.tooltip}
                 >
                   <span className={option.id === value ? "command-select-check active" : "command-select-check"}>{option.id === value ? "✓" : ""}</span>
                   <span>

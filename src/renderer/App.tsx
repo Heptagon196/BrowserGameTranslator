@@ -2,8 +2,10 @@ import React, { Suspense, useCallback, useEffect, useRef, useState, useTransitio
 import { createRoot } from "react-dom/client";
 import { Toaster, toast } from "sonner";
 import * as RadixTooltip from "@radix-ui/react-tooltip";
+import { Group, Panel, Separator } from "react-resizable-panels";
 import {
   Archive,
+  BookOpen,
   Bot,
   Download,
   FileSearch,
@@ -20,10 +22,7 @@ import {
 import type {
   AnalysisResult,
   AiBalanceSnapshot,
-  AiPermissionMode,
-  AiShellAuthorizationRequest,
   AppStateSnapshot,
-  ChatMessage,
   CreateProjectInput,
   PackageFormat,
   PreviewStatus,
@@ -33,7 +32,7 @@ import type {
 } from "../shared/types";
 import { FieldRow, PathInput } from "./components/ui/Form";
 import { AppDialog, AppTooltip, CheckboxControl, StyledSelect } from "./components/ui/Primitives";
-import type { TableSettings } from "./components/table/DataTable";
+import type { ResourceTableId, TableSettings } from "./components/table/DataTable";
 import {
   defaultUiSettings,
   languageLabel,
@@ -47,7 +46,7 @@ import {
 } from "./settingsModel";
 import "./styles.css";
 
-type ViewId = "project" | "import" | "analysis" | "translate" | "proofread" | "prompts" | "tools" | "settings";
+type ViewId = "project" | "dictionary" | "import" | "analysis" | "translate" | "proofread" | "prompts" | "tools" | "settings";
 
 type LazyWithPreload<T extends React.ComponentType<any>> = React.LazyExoticComponent<T> & {
   preload: () => Promise<{ default: T }>;
@@ -63,6 +62,7 @@ const ImportExportView = lazyWithPreload(() => import("./views/ImportExportView"
 const AnalysisView = lazyWithPreload(() => import("./views/AnalysisView"));
 const TranslateView = lazyWithPreload(() => import("./views/TranslateView"));
 const ProofreadView = lazyWithPreload(() => import("./views/ProofreadView"));
+const DictionaryView = lazyWithPreload(() => import("./views/DictionaryView"));
 const PromptsView = lazyWithPreload(() => import("./views/PromptsView"));
 const ToolsView = lazyWithPreload(() => import("./views/ToolsView"));
 const SettingsView = lazyWithPreload(() => import("./views/SettingsView"));
@@ -73,6 +73,7 @@ const emptyAnalysis: AnalysisResult = { characters: [], glossary: [], noTranslat
 const defaultProofOptions: ProofreadOptions = {
   languageCheck: true,
   targetLanguageRatio: 0.75,
+  characterCheck: true,
   glossaryCheck: true,
   untranslatedStatusCheck: true,
   noTranslateCheck: true,
@@ -88,11 +89,11 @@ const viewPreloaders: Partial<Record<ViewId, () => Promise<unknown>>> = {
   analysis: AnalysisView.preload,
   translate: TranslateView.preload,
   proofread: ProofreadView.preload,
+  dictionary: DictionaryView.preload,
   prompts: PromptsView.preload,
   tools: ToolsView.preload,
   settings: SettingsView.preload
 };
-
 function tableSettingsForProject(pageSize: number, searchPaginationEnabled: boolean): TableSettings {
   return {
     paginationEnabled: false,
@@ -119,8 +120,31 @@ function loadUiSettings(): UiSettings {
   }
 }
 
+function loadProofreadOptions(): ProofreadOptions {
+  try {
+    const stored = JSON.parse(localStorage.getItem("bgt.proofreadOptions") || "{}") as Partial<ProofreadOptions>;
+    const targetLanguageRatio = Number(stored.targetLanguageRatio);
+    return {
+      languageCheck: stored.languageCheck ?? defaultProofOptions.languageCheck,
+      targetLanguageRatio: Number.isFinite(targetLanguageRatio) ? Math.min(1, Math.max(0, targetLanguageRatio)) : defaultProofOptions.targetLanguageRatio,
+      characterCheck: stored.characterCheck ?? defaultProofOptions.characterCheck,
+      glossaryCheck: stored.glossaryCheck ?? defaultProofOptions.glossaryCheck,
+      untranslatedStatusCheck: stored.untranslatedStatusCheck ?? defaultProofOptions.untranslatedStatusCheck,
+      noTranslateCheck: stored.noTranslateCheck ?? defaultProofOptions.noTranslateCheck,
+      numericResidueCheck: stored.numericResidueCheck ?? defaultProofOptions.numericResidueCheck,
+      lineBreakCheck: stored.lineBreakCheck ?? defaultProofOptions.lineBreakCheck,
+      placeholderCheck: stored.placeholderCheck ?? defaultProofOptions.placeholderCheck,
+      htmlTagCheck: stored.htmlTagCheck ?? defaultProofOptions.htmlTagCheck,
+      emptyTranslationCheck: stored.emptyTranslationCheck ?? defaultProofOptions.emptyTranslationCheck
+    };
+  } catch {
+    return defaultProofOptions;
+  }
+}
+
 function App() {
   const [view, setView] = useState<ViewId>("project");
+  const [activeAnalysisTable, setActiveAnalysisTable] = useState<ResourceTableId>("characters");
   const [, startViewTransition] = useTransition();
   const [snapshot, setSnapshot] = useState<AppStateSnapshot>({
     project: null,
@@ -132,13 +156,10 @@ function App() {
     scanReport: null,
     aiLocalizationPlan: null,
     analysis: emptyAnalysis,
-    issues: [],
-    chat: []
+    issues: []
   });
   const [busy, setBusy] = useState(false);
-  const [chatBusy, setChatBusy] = useState(false);
   const [translationBusy, setTranslationBusy] = useState(false);
-  const [chatWidth, setChatWidth] = useState(380);
   const [chatFullscreen, setChatFullscreen] = useState(false);
   const [chatCollapsed, setChatCollapsed] = useState(true);
   const [packageModalOpen, setPackageModalOpen] = useState(false);
@@ -148,14 +169,9 @@ function App() {
   const [packageAddLauncher, setPackageAddLauncher] = useState(false);
   const [lastPackagePath, setLastPackagePath] = useState("");
   const [previewStatus, setPreviewStatus] = useState<PreviewStatus>({ running: false });
-  const [shellAuthorizationRequest, setShellAuthorizationRequest] = useState<AiShellAuthorizationRequest | null>(null);
   const [aiBalance, setAiBalance] = useState<AiBalanceSnapshot | null>(null);
-  const [aiPermissionMode, setAiPermissionMode] = useState<AiPermissionMode>(() => {
-    const value = localStorage.getItem("bgt.aiPermissionMode");
-    return value === "workspace" || value === "full" ? value : "restricted";
-  });
   const [status, setStatus] = useState("未打开项目");
-  const [proofOptions, setProofOptions] = useState(defaultProofOptions);
+  const [proofOptions, setProofOptions] = useState(loadProofreadOptions);
   const [searchPaginationEnabled, setSearchPaginationEnabled] = useState(() => localStorage.getItem("bgt.searchPaginationEnabled") === "true");
   const [tablePageSize, setTablePageSize] = useState(() => normalizeTablePageSize(localStorage.getItem("bgt.tablePageSize")));
   const [uiSettings, setUiSettings] = useState(loadUiSettings);
@@ -216,79 +232,6 @@ function App() {
 
   const saveItems = async (items: TextItem[]) =>
     run("保存文本项", () => window.bgt.saveTextItems(items), (textItems) => setSnapshot((state) => ({ ...state, textItems })));
-
-  const saveChat = async (chat: ChatMessage[]) => {
-    snapshotRef.current = { ...snapshotRef.current, chat };
-    setSnapshot((state) => ({ ...state, chat }));
-    if (snapshotRef.current.project) await window.bgt.saveChat(chat);
-  };
-
-  const patchChatMessage = useCallback((id: string, patch: (message: ChatMessage) => ChatMessage) => {
-    setSnapshot((state) => {
-      const chat = state.chat.map((message) => (message.id === id ? patch(message) : message));
-      snapshotRef.current = { ...snapshotRef.current, chat };
-      return { ...state, chat };
-    });
-  }, []);
-
-  const sendChat = async (content: string) => {
-    if (!content.trim()) return;
-    const userMessage: ChatMessage = {
-      id: `msg_${Date.now()}`,
-      role: "user",
-      content: content.trim(),
-      createdAt: new Date().toISOString(),
-      origin: "user",
-      kind: "chat"
-    };
-    const baseChat = [...snapshotRef.current.chat, userMessage];
-    await saveChat(baseChat);
-    const appendSystemSummary = async (chat: ChatMessage[], text: string) => {
-      const summary: ChatMessage = {
-        id: `msg_${Date.now() + 1}`,
-        role: "system",
-        content: text,
-        createdAt: new Date().toISOString(),
-        origin: "program",
-        kind: "program_summary"
-      };
-      await saveChat([...chat, summary]);
-    };
-    if (translationBusy) {
-      await appendSystemSummary(baseChat, "已加入等待队列。当前 AI 输出结束后会先回复这条消息，再继续下一段程序提示词。");
-      return;
-    }
-    if (!chatProvider?.apiKey) {
-      await appendSystemSummary(baseChat, "请先在设置页填写 API Key，才能让 AI 回复。");
-      return;
-    }
-    setChatBusy(true);
-    const assistantMessage: ChatMessage = {
-      id: `msg_${Date.now() + 1}_assistant`,
-      role: "assistant",
-      content: "",
-      createdAt: new Date().toISOString(),
-      origin: "user",
-      kind: "chat"
-    };
-    await saveChat([...baseChat, assistantMessage]);
-    try {
-      const reply = await window.bgt.replyChatStream(chatProvider, baseChat, aiPermissionMode, assistantMessage.id);
-      await saveChat([...baseChat, { ...reply, origin: "user", kind: "chat" }]);
-      const refreshed = await window.bgt.refreshProject();
-      snapshotRef.current = refreshed;
-      setSnapshot(refreshed);
-      void refreshAiBalance(deepSeekBalanceProviderRef.current);
-    } catch (error) {
-      await appendSystemSummary(baseChat, error instanceof Error ? error.message : String(error));
-    } finally {
-      setChatBusy(false);
-    }
-  };
-
-  const clearChat = async () => {
-    await saveChat([]);
-  };
 
   const openPackageModal = () => {
     if (!snapshot.project) return;
@@ -357,22 +300,6 @@ function App() {
     );
   };
 
-  const startChatResize = (event: React.PointerEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const startX = event.clientX;
-    const startWidth = chatWidth;
-    const onPointerMove = (moveEvent: PointerEvent) => {
-      const nextWidth = startWidth + startX - moveEvent.clientX;
-      setChatWidth(Math.min(640, Math.max(340, nextWidth)));
-    };
-    const onPointerUp = () => {
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerUp);
-    };
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", onPointerUp);
-  };
-
   useEffect(() => {
     const loadInitial = async () => {
       const [providerState, recentProjects] = await Promise.all([window.bgt.loadProviders(), window.bgt.loadRecentProjects()]);
@@ -425,16 +352,16 @@ function App() {
   }, [translationBusy, activeProvider?.id, activeProvider?.apiKey, activeProvider?.baseUrl, activeProvider?.type, refreshAiBalance]);
 
   useEffect(() => {
-    localStorage.setItem("bgt.aiPermissionMode", aiPermissionMode);
-  }, [aiPermissionMode]);
-
-  useEffect(() => {
     localStorage.setItem("bgt.searchPaginationEnabled", String(searchPaginationEnabled));
   }, [searchPaginationEnabled]);
 
   useEffect(() => {
     localStorage.setItem("bgt.tablePageSize", String(tablePageSize));
   }, [tablePageSize]);
+
+  useEffect(() => {
+    localStorage.setItem("bgt.proofreadOptions", JSON.stringify(proofOptions));
+  }, [proofOptions]);
 
   useEffect(() => {
     localStorage.setItem("bgt.uiSettings", JSON.stringify(uiSettings));
@@ -463,29 +390,148 @@ function App() {
     };
   }, [snapshot.project?.projectRoot, snapshot.project?.homePage]);
 
-  useEffect(() => window.bgt.onShellAuthorizationRequest(setShellAuthorizationRequest), []);
+  const workspacePane = (
+    <main className="workspace">
+      <header className="topbar">
+        <div>
+          <h1>{viewTitle(view)}</h1>
+          <p>{snapshot.project ? `${snapshot.project.projectName} · ${languageLabel(snapshot.project.sourceLanguage)} -> ${languageLabel(snapshot.project.targetLanguage)}` : "创建或打开项目后开始"}</p>
+        </div>
+        <div className="topbar-actions">
+          {chatCollapsed && (
+            <AppTooltip content="展开 AI 窗口">
+              <button
+                className="icon-button"
+                aria-label="展开 AI 窗口"
+                onMouseEnter={() => void AIChatPanel.preload()}
+                onFocus={() => void AIChatPanel.preload()}
+                onClick={() => {
+                  void AIChatPanel.preload();
+                  setChatCollapsed(false);
+                }}
+              >
+                <Bot size={17} />
+              </button>
+            </AppTooltip>
+          )}
+        </div>
+      </header>
+      <section className={tableViewIds.has(view) ? "content table-content" : "content"}>
+        {view === "project" && <ProjectView busy={busy} snapshot={snapshot} run={run} mergeSnapshot={mergeSnapshot} showToast={showToast} onOpenTools={() => navigateTo("tools")} />}
+        {view === "import" && (
+          <Suspense fallback={null}>
+            <ImportExportView busy={busy} items={snapshot.textItems} snapshot={snapshot} provider={activeProvider} tableSettings={tableSettings} run={run} setSnapshot={setSnapshot} saveItems={saveItems} />
+          </Suspense>
+        )}
+        {view === "analysis" && (
+          <Suspense fallback={null}>
+            <AnalysisView
+              busy={busy}
+              snapshot={snapshot}
+              provider={activeProvider}
+              tableSettings={tableSettings}
+              activeTable={activeAnalysisTable}
+              onActiveTableChange={setActiveAnalysisTable}
+              run={run}
+              setSnapshot={setSnapshot}
+            />
+          </Suspense>
+        )}
+        {view === "translate" && (
+          <Suspense fallback={null}>
+            <TranslateView
+              busy={busy || translationBusy}
+              snapshot={snapshot}
+              provider={activeProvider}
+              aiBalance={aiBalance}
+              run={run}
+              setSnapshot={setSnapshot}
+              setTranslationBusy={setTranslationBusy}
+              snapshotRef={snapshotRef}
+              tableSettings={tableSettings}
+            />
+          </Suspense>
+        )}
+        {view === "proofread" && (
+          <Suspense fallback={null}>
+            <ProofreadView busy={busy} snapshot={snapshot} provider={activeProvider} options={proofOptions} tableSettings={tableSettings} setOptions={setProofOptions} run={run} setSnapshot={setSnapshot} />
+          </Suspense>
+        )}
+        {view === "dictionary" && (
+          <Suspense fallback={null}>
+            <DictionaryView busy={busy} snapshot={snapshot} tableSettings={tableSettings} run={run} setSnapshot={setSnapshot} />
+          </Suspense>
+        )}
+        {view === "prompts" && (
+          <Suspense fallback={null}>
+            <PromptsView snapshot={snapshot} run={run} />
+          </Suspense>
+        )}
+        {view === "tools" && (
+          <Suspense fallback={null}>
+            <ToolsView run={run} />
+          </Suspense>
+        )}
+        {view === "settings" && (
+          <Suspense fallback={null}>
+            <SettingsView
+              snapshot={snapshot}
+              setSnapshot={setSnapshot}
+              run={run}
+              showToast={showToast}
+              tablePageSize={tablePageSize}
+              setTablePageSize={setTablePageSize}
+              searchPaginationEnabled={searchPaginationEnabled}
+              setSearchPaginationEnabled={setSearchPaginationEnabled}
+              uiSettings={uiSettings}
+              setUiSettings={setUiSettings}
+            />
+          </Suspense>
+        )}
+      </section>
+      <footer className="statusbar">
+        <span>{busy ? "任务执行中" : "空闲"}</span>
+        <span>{status}</span>
+        <span>文本 {snapshot.textItems.length}</span>
+        <span>问题 {snapshot.issues.length}</span>
+      </footer>
+    </main>
+  );
 
-  useEffect(() => {
-    const unsubscribeDelta = window.bgt.onChatStreamDelta(({ id, delta }) => {
-      patchChatMessage(id, (message) => ({ ...message, content: `${message.content}${delta}` }));
-    });
-    const unsubscribeReset = window.bgt.onChatStreamReset(({ id }) => {
-      patchChatMessage(id, (message) => ({ ...message, content: "" }));
-    });
-    return () => {
-      unsubscribeDelta();
-      unsubscribeReset();
-    };
-  }, [patchChatMessage]);
+  const chatPane = !chatCollapsed ? (
+    <Suspense fallback={null}>
+      <AIChatPanel
+        key={snapshot.project?.projectRoot ?? "no-project"}
+        disabled={!snapshot.project}
+        selectedModelId={activeChatProvider ? modelSelectionValue(activeChatProvider.id, activeChatProvider.chatModel || activeChatProvider.model) : undefined}
+        modelOptions={modelSelectionOptions(snapshot.providers)}
+        onModelChange={switchAiModel}
+        aiBalance={aiBalance}
+        fullscreen={chatFullscreen}
+        onToggleFullscreen={() => setChatFullscreen((value) => !value)}
+        onCollapse={() => {
+          setChatFullscreen(false);
+          setChatCollapsed(true);
+        }}
+        provider={chatProvider}
+        onProjectChanged={async () => {
+          const refreshed = await window.bgt.refreshProject();
+          setSnapshot(refreshed);
+        }}
+        context={{
+          currentView: viewTitle(view),
+          ...currentTableContext(view, activeAnalysisTable),
+          projectName: snapshot.project?.projectName
+        }}
+        analysis={snapshot.analysis}
+        textItems={snapshot.textItems}
+      />
+    </Suspense>
+  ) : null;
 
   return (
     <RadixTooltip.Provider delayDuration={220} skipDelayDuration={120}>
-      <div
-        className={`app-shell ${chatFullscreen && !chatCollapsed ? "chat-expanded" : ""}`}
-        style={{
-          gridTemplateColumns: chatFullscreen && !chatCollapsed ? "230px minmax(0, 1fr)" : chatCollapsed ? "230px minmax(680px, 1fr)" : `230px minmax(680px, 1fr) ${chatWidth}px`
-        }}
-      >
+      <div className={`app-shell ${chatFullscreen && !chatCollapsed ? "chat-expanded" : ""}`}>
         <aside className="sidebar">
           <div className="brand">
             <Languages size={24} />
@@ -494,11 +540,16 @@ function App() {
               <span>Offline game AI translation</span>
             </div>
           </div>
-          <NavButton active={view === "project"} icon={<FolderOpen size={18} />} label="项目" onClick={() => navigateTo("project")} onPreload={() => preloadView("project")} />
-          <NavButton active={view === "import"} icon={<Import size={18} />} label="提取/回填" onClick={() => navigateTo("import")} onPreload={() => preloadView("import")} />
-          <NavButton active={view === "analysis"} icon={<FileSearch size={18} />} label="分析" onClick={() => navigateTo("analysis")} onPreload={() => preloadView("analysis")} />
-          <NavButton active={view === "translate"} icon={<Bot size={18} />} label="翻译" onClick={() => navigateTo("translate")} onPreload={() => preloadView("translate")} />
-          <NavButton active={view === "proofread"} icon={<ShieldCheck size={18} />} label="校对" onClick={() => navigateTo("proofread")} onPreload={() => preloadView("proofread")} />
+          <NavButton active={["project", "import", "analysis", "translate", "proofread"].includes(view)} icon={<FolderOpen size={18} />} label="项目" onClick={() => navigateTo("project")} onPreload={() => preloadView("project")} />
+          {snapshot.project ? (
+            <div className="sidebar-subnav" aria-label="项目流程">
+              <NavButton active={view === "import"} className="nav-subitem" icon={<Import size={16} />} label="提取/回填" onClick={() => navigateTo("import")} onPreload={() => preloadView("import")} />
+              <NavButton active={view === "analysis"} className="nav-subitem" icon={<FileSearch size={16} />} label="术语分析" onClick={() => navigateTo("analysis")} onPreload={() => preloadView("analysis")} />
+              <NavButton active={view === "translate"} className="nav-subitem" icon={<Bot size={16} />} label="翻译" onClick={() => navigateTo("translate")} onPreload={() => preloadView("translate")} />
+              <NavButton active={view === "proofread"} className="nav-subitem" icon={<ShieldCheck size={16} />} label="校对" onClick={() => navigateTo("proofread")} onPreload={() => preloadView("proofread")} />
+            </div>
+          ) : null}
+          <NavButton active={view === "dictionary"} icon={<BookOpen size={18} />} label="词典" onClick={() => navigateTo("dictionary")} onPreload={() => preloadView("dictionary")} />
           <NavButton active={view === "prompts"} icon={<MessageSquare size={18} />} label="提示词" onClick={() => navigateTo("prompts")} onPreload={() => preloadView("prompts")} />
           <NavButton active={view === "tools"} icon={<Wrench size={18} />} label="工具" onClick={() => navigateTo("tools")} onPreload={() => preloadView("tools")} />
           <NavButton active={view === "settings"} icon={<Settings size={18} />} label="设置" onClick={() => navigateTo("settings")} onPreload={() => preloadView("settings")} />
@@ -537,131 +588,18 @@ function App() {
           </div>
         </aside>
 
-        <main className="workspace">
-          <header className="topbar">
-            <div>
-              <h1>{viewTitle(view)}</h1>
-              <p>{snapshot.project ? `${snapshot.project.projectName} · ${languageLabel(snapshot.project.sourceLanguage)} -> ${languageLabel(snapshot.project.targetLanguage)}` : "创建或打开项目后开始"}</p>
-            </div>
-            <div className="topbar-actions">
-              {chatCollapsed && (
-                <AppTooltip content="展开 AI 窗口">
-                  <button
-                    className="icon-button"
-                    aria-label="展开 AI 窗口"
-                    onMouseEnter={() => void AIChatPanel.preload()}
-                    onFocus={() => void AIChatPanel.preload()}
-                    onClick={() => {
-                      void AIChatPanel.preload();
-                      setChatCollapsed(false);
-                    }}
-                  >
-                    <Bot size={17} />
-                  </button>
-                </AppTooltip>
-              )}
-            </div>
-          </header>
-          <section className={tableViewIds.has(view) ? "content table-content" : "content"}>
-            {view === "project" && <ProjectView busy={busy} snapshot={snapshot} run={run} mergeSnapshot={mergeSnapshot} showToast={showToast} onOpenTools={() => navigateTo("tools")} />}
-            {view === "import" && (
-              <Suspense fallback={null}>
-                <ImportExportView busy={busy} items={snapshot.textItems} snapshot={snapshot} provider={activeProvider} tableSettings={tableSettings} run={run} setSnapshot={setSnapshot} saveItems={saveItems} />
-              </Suspense>
-            )}
-            {view === "analysis" && (
-              <Suspense fallback={null}>
-                <AnalysisView busy={busy} snapshot={snapshot} provider={activeProvider} tableSettings={tableSettings} run={run} setSnapshot={setSnapshot} />
-              </Suspense>
-            )}
-            {view === "translate" && (
-              <Suspense fallback={null}>
-                <TranslateView
-                  busy={busy || translationBusy}
-                  snapshot={snapshot}
-                  provider={activeProvider}
-                  aiBalance={aiBalance}
-                  chatProvider={chatProvider}
-                  run={run}
-                  setSnapshot={setSnapshot}
-                  setTranslationBusy={setTranslationBusy}
-                  saveChat={saveChat}
-                  snapshotRef={snapshotRef}
-                  setChatBusy={setChatBusy}
-                  aiPermissionMode={aiPermissionMode}
-                  tableSettings={tableSettings}
-                />
-              </Suspense>
-            )}
-            {view === "proofread" && (
-              <Suspense fallback={null}>
-                <ProofreadView busy={busy} snapshot={snapshot} options={proofOptions} tableSettings={tableSettings} setOptions={setProofOptions} run={run} setSnapshot={setSnapshot} />
-              </Suspense>
-            )}
-            {view === "prompts" && (
-              <Suspense fallback={null}>
-                <PromptsView snapshot={snapshot} run={run} />
-              </Suspense>
-            )}
-            {view === "tools" && (
-              <Suspense fallback={null}>
-                <ToolsView run={run} />
-              </Suspense>
-            )}
-            {view === "settings" && (
-              <Suspense fallback={null}>
-                <SettingsView
-                  snapshot={snapshot}
-                  setSnapshot={setSnapshot}
-                  run={run}
-                  showToast={showToast}
-                  tablePageSize={tablePageSize}
-                  setTablePageSize={setTablePageSize}
-                  searchPaginationEnabled={searchPaginationEnabled}
-                  setSearchPaginationEnabled={setSearchPaginationEnabled}
-                  uiSettings={uiSettings}
-                  setUiSettings={setUiSettings}
-                />
-              </Suspense>
-            )}
-          </section>
-          <footer className="statusbar">
-            <span>{busy ? "任务执行中" : "空闲"}</span>
-            <span>{status}</span>
-            <span>文本 {snapshot.textItems.length}</span>
-            <span>问题 {snapshot.issues.length}</span>
-          </footer>
-        </main>
-
-        {!chatCollapsed && (
-          <Suspense fallback={null}>
-            <AIChatPanel
-              messages={snapshot.chat}
-              onSend={sendChat}
-              onClear={clearChat}
-              disabled={!snapshot.project}
-              busy={chatBusy}
-              programBusy={translationBusy}
-              selectedModelId={activeChatProvider ? modelSelectionValue(activeChatProvider.id, activeChatProvider.chatModel || activeChatProvider.model) : undefined}
-              modelOptions={modelSelectionOptions(snapshot.providers)}
-              onModelChange={switchAiModel}
-              aiBalance={aiBalance}
-              permissionMode={aiPermissionMode}
-              onPermissionModeChange={setAiPermissionMode}
-              fullscreen={chatFullscreen}
-              onToggleFullscreen={() => setChatFullscreen((value) => !value)}
-              onCollapse={() => {
-                setChatFullscreen(false);
-                setChatCollapsed(true);
-              }}
-              shellAuthorizationRequest={shellAuthorizationRequest}
-              onShellAuthorizationResponse={(id, allowed) => {
-                window.bgt.respondShellAuthorization(id, allowed);
-                setShellAuthorizationRequest((current) => (current?.id === id ? null : current));
-              }}
-              onResizeStart={startChatResize}
-            />
-          </Suspense>
+        {chatCollapsed ? (
+          <section className="workspace-region">{workspacePane}</section>
+        ) : (
+          <Group className={`workspace-region main-chat-panel-group${chatFullscreen ? " chat-fullscreen-group" : ""}`} orientation="horizontal">
+            <Panel id="workspace-panel" minSize="320px">
+              {workspacePane}
+            </Panel>
+            <Separator className="main-chat-resize-handle" />
+            <Panel id="ai-chat-panel" minSize="300px" maxSize="68%" defaultSize="350px">
+              {chatPane}
+            </Panel>
+          </Group>
         )}
 
         {snapshot.project && (
@@ -723,14 +661,11 @@ function ProjectView({
   const openOrCreateProject = async () => {
     const directory = await window.bgt.selectDirectory();
     if (!directory) return;
-    try {
-      const opened = await window.bgt.openProjectDirectory(directory);
+    const opened = await window.bgt.openProjectDirectory(directory);
+    if (opened) {
       mergeSnapshot(opened);
       showToast("项目打开成功");
       return;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!message.includes("not a BrowserGameTranslator project")) throw error;
     }
     const projectName = basename(directory);
     setCreateInput({
@@ -945,9 +880,6 @@ function PackageDialog({
         </div>
       )}
       <div className="button-row modal-actions">
-        <button className="secondary-button" onClick={() => onOpenChange(false)}>
-          关闭
-        </button>
         <button disabled={busy || !fileName.trim() || !outputDirectory.trim()} onClick={onStart}>
           <Archive size={16} />
           开始打包
@@ -957,9 +889,9 @@ function PackageDialog({
   );
 }
 
-function NavButton({ active, icon, label, onClick, onPreload }: { active: boolean; icon: React.ReactNode; label: string; onClick: () => void; onPreload?: () => void }) {
+function NavButton({ active, icon, label, className = "", onClick, onPreload }: { active: boolean; icon: React.ReactNode; label: string; className?: string; onClick: () => void; onPreload?: () => void }) {
   return (
-    <button className={active ? "nav active" : "nav"} onClick={onClick} onMouseEnter={onPreload} onFocus={onPreload}>
+    <button className={["nav", className, active ? "active" : ""].filter(Boolean).join(" ")} onClick={onClick} onMouseEnter={onPreload} onFocus={onPreload}>
       {icon}
       {label}
     </button>
@@ -996,13 +928,63 @@ function viewTitle(view: ViewId): string {
   return {
     project: "项目",
     import: "提取/回填",
-    analysis: "分析",
+    analysis: "术语分析",
     translate: "翻译",
     proofread: "校对",
+    dictionary: "词典",
     prompts: "提示词",
     tools: "工具",
     settings: "设置"
   }[view];
+}
+
+function currentTableContext(view: ViewId, activeAnalysisTable: ResourceTableId): { currentTable?: string; currentTableId?: string; currentTableDescription?: string } {
+  const analysisContext = analysisTableContext(activeAnalysisTable);
+  const contexts: Partial<Record<ViewId, { currentTable: string; currentTableId: string; currentTableDescription: string }>> = {
+    import: {
+      currentTable: "文本表",
+      currentTableId: "project.text",
+      currentTableDescription: "当前页面正在查看或编辑提取/回填用的翻译文本行。使用 table_* 工具时，文本行对应 project.text。"
+    },
+    translate: {
+      currentTable: "文本表",
+      currentTableId: "project.text",
+      currentTableDescription: "当前页面正在查看或编辑批量翻译用的翻译文本行。使用 table_* 工具时，文本行对应 project.text。"
+    },
+    analysis: {
+      currentTable: analysisContext.currentTable,
+      currentTableId: analysisContext.currentTableId,
+      currentTableDescription: `${analysisContext.currentTableDescription} 分析页面还可以切换到其它资源表：人物名用 project.characters，普通术语用 project.glossary，禁翻和保留标记用 project.noTranslate。`
+    },
+    proofread: {
+      currentTable: "校对问题表",
+      currentTableId: "proofread.issues",
+      currentTableDescription: "当前页面显示校对问题。校对问题本身不是 table_* 可编辑项目表；需要读取或修改对应翻译文本时使用 project.text，并用问题行的 textItemId 找到文本行。"
+    }
+  };
+  return contexts[view] ?? {};
+}
+
+function analysisTableContext(table: ResourceTableId): { currentTable: string; currentTableId: string; currentTableDescription: string } {
+  if (table === "glossary") {
+    return {
+      currentTable: "术语表",
+      currentTableId: "project.glossary",
+      currentTableDescription: "当前分析页正在显示术语表，记录普通术语、专有名词、道具、组织等固定译法。"
+    };
+  }
+  if (table === "noTranslate") {
+    return {
+      currentTable: "禁翻表",
+      currentTableId: "project.noTranslate",
+      currentTableDescription: "当前分析页正在显示禁翻表，记录不应翻译或必须原样保留的标记、代码、占位符和特殊文本。"
+    };
+  }
+  return {
+    currentTable: "人物表",
+    currentTableId: "project.characters",
+    currentTableDescription: "当前分析页正在显示人物表，记录完整人名、姓、名、译名、备注和启用状态。"
+  };
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

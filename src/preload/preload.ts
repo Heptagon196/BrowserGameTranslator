@@ -5,11 +5,21 @@ import {
   AaOfflineDownloadResult,
   AnalysisResult,
   AiBalanceSnapshot,
-  AiPermissionMode,
-  AiShellAuthorizationRequest,
+  AgentChatHistoryItem,
+  AgentChatHistoryRepository,
+  AgentCancelRequest,
+  AgentToolApprovalRequest,
+  AgentRunRequest,
+  AgentRunEventPayload,
+  AgentRunResult,
+  AgentRunStreamRequest,
   AppStateSnapshot,
-  ChatMessage,
   CreateProjectInput,
+  DictionaryImportResult,
+  DictionaryScope,
+  DictionaryTable,
+  DictionaryTableMeta,
+  DictionaryTableSummary,
   ItchDownloadEvent,
   ItchDownloadInput,
   ItchDownloadProgress,
@@ -19,12 +29,14 @@ import {
   PackageProjectResult,
   PatchPreview,
   PreviewStatus,
+  ProgramAiIoEvent,
   ProofreadIssue,
   ProofreadOptions,
   PromptConfig,
   PromptScope,
   ProjectConfig,
   ProviderConfig,
+  ResourceTableType,
   TextItem
 } from "../shared/types";
 
@@ -34,7 +46,7 @@ const api = {
   createProject: (input: CreateProjectInput): Promise<AppStateSnapshot> => ipcRenderer.invoke("project:create", input),
   validateCreateProject: (input: CreateProjectInput): Promise<string[]> => ipcRenderer.invoke("project:validateCreate", input),
   openProject: (): Promise<AppStateSnapshot | null> => ipcRenderer.invoke("project:open"),
-  openProjectDirectory: (directory: string): Promise<AppStateSnapshot> => ipcRenderer.invoke("project:openDirectory", directory),
+  openProjectDirectory: (directory: string): Promise<AppStateSnapshot | null> => ipcRenderer.invoke("project:openDirectory", directory),
   openRecentProject: (projectPath: string): Promise<AppStateSnapshot> => ipcRenderer.invoke("project:openRecent", projectPath),
   loadRecentProjects: (): Promise<AppStateSnapshot["recentProjects"]> => ipcRenderer.invoke("project:recent"),
   refreshProject: (): Promise<AppStateSnapshot> => ipcRenderer.invoke("project:refresh"),
@@ -56,8 +68,14 @@ const api = {
     ipcRenderer.on("ai-cost:update", wrapped);
     return () => ipcRenderer.removeListener("ai-cost:update", wrapped);
   },
+  onProgramAiIo: (listener: (event: ProgramAiIoEvent) => void): (() => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, ioEvent: ProgramAiIoEvent) => listener(ioEvent);
+    ipcRenderer.on("ai-program:io", wrapped);
+    return () => ipcRenderer.removeListener("ai-program:io", wrapped);
+  },
   loadPrompts: (scope: PromptScope): Promise<PromptConfig> => ipcRenderer.invoke("prompts:load", scope),
   savePrompts: (scope: PromptScope, prompts: PromptConfig): Promise<PromptConfig> => ipcRenderer.invoke("prompts:save", scope, prompts),
+  loadDefaultPrompts: (): Promise<PromptConfig> => ipcRenderer.invoke("prompts:defaults"),
   loadEffectivePrompts: (): Promise<PromptConfig> => ipcRenderer.invoke("prompts:effective"),
   downloadItchHtml5Game: (input: ItchDownloadInput): Promise<ItchDownloadResult> => ipcRenderer.invoke("tools:itch:downloadHtml5", input),
   onItchDownloadLog: (listener: (event: ItchDownloadEvent) => void): (() => void) => {
@@ -90,39 +108,42 @@ const api = {
   translateMissingAnalysisResources: (provider: ProviderConfig): Promise<AnalysisResult> => ipcRenderer.invoke("analysis:translateMissing", provider),
   translateAnalysisRows: (provider: ProviderConfig, selection: { table: "characters" | "glossary"; ids: string[] }): Promise<AnalysisResult> =>
     ipcRenderer.invoke("analysis:translateRows", provider, selection),
-  translate: (provider: ProviderConfig, targetLanguage: string, chat: ChatMessage[]): Promise<TextItem[]> =>
-    ipcRenderer.invoke("translation:start", provider, targetLanguage, chat),
-  translateBatch: (provider: ProviderConfig, targetLanguage: string, chat: ChatMessage[], items: TextItem[]): Promise<TextItem[]> =>
-    ipcRenderer.invoke("translation:batch", provider, targetLanguage, chat, items),
+  listDictionaryTables: (): Promise<DictionaryTableSummary[]> => ipcRenderer.invoke("dictionary:list"),
+  loadDictionaryTable: (scope: DictionaryScope | "projectDefault", id: string, tableType: ResourceTableType): Promise<DictionaryTable> =>
+    ipcRenderer.invoke("dictionary:load", scope, id, tableType),
+  saveDictionaryTable: (scope: DictionaryScope | "projectDefault", table: DictionaryTable): Promise<DictionaryTable> =>
+    ipcRenderer.invoke("dictionary:save", scope, table),
+  createEmptyDictionaryTable: (scope: DictionaryScope, tableType: ResourceTableType, meta: Partial<DictionaryTableMeta>): Promise<DictionaryTable> =>
+    ipcRenderer.invoke("dictionary:createEmpty", scope, tableType, meta),
+  deleteDictionaryTable: (scope: DictionaryScope, id: string): Promise<void> => ipcRenderer.invoke("dictionary:delete", scope, id),
+  exportDictionaryTable: (table: DictionaryTable): Promise<string | null> => ipcRenderer.invoke("dictionary:export", table),
+  importDictionaryTable: (scope: DictionaryScope, conflictMode?: "overwrite" | "newId", pendingTable?: DictionaryTable): Promise<DictionaryImportResult> =>
+    ipcRenderer.invoke("dictionary:import", scope, conflictMode, pendingTable),
+  translate: (provider: ProviderConfig, targetLanguage: string): Promise<TextItem[]> =>
+    ipcRenderer.invoke("translation:start", provider, targetLanguage),
+  translateBatch: (provider: ProviderConfig, targetLanguage: string, items: TextItem[]): Promise<TextItem[]> =>
+    ipcRenderer.invoke("translation:batch", provider, targetLanguage, items),
   proofread: (items: TextItem[], analysis: AnalysisResult, options: ProofreadOptions): Promise<ProofreadIssue[]> =>
     ipcRenderer.invoke("proofread:start", items, analysis, options),
+  aiProofread: (provider: ProviderConfig, issues: ProofreadIssue[]): Promise<TextItem[]> =>
+    ipcRenderer.invoke("proofread:ai", provider, issues),
   previewPatch: (items: TextItem[]): Promise<PatchPreview> => ipcRenderer.invoke("patch:preview", items),
   applyPatch: (items: TextItem[]): Promise<PatchPreview> => ipcRenderer.invoke("patch:apply", items),
   applyAiPatch: (items: TextItem[]): Promise<PatchPreview> => ipcRenderer.invoke("patch:aiApply", items),
   restoreGame: (): Promise<AppStateSnapshot> => ipcRenderer.invoke("patch:restore"),
-  replyChat: (provider: ProviderConfig, chat: ChatMessage[], permissionMode: AiPermissionMode): Promise<ChatMessage> =>
-    ipcRenderer.invoke("chat:reply", provider, chat, permissionMode),
-  replyChatStream: (provider: ProviderConfig, chat: ChatMessage[], permissionMode: AiPermissionMode, streamId: string): Promise<ChatMessage> =>
-    ipcRenderer.invoke("chat:replyStream", provider, chat, permissionMode, streamId),
-  onChatStreamDelta: (listener: (event: { id: string; delta: string }) => void): (() => void) => {
-    const wrapped = (_event: Electron.IpcRendererEvent, payload: { id: string; delta: string }) => listener(payload);
-    ipcRenderer.on("chat:stream:delta", wrapped);
-    return () => ipcRenderer.removeListener("chat:stream:delta", wrapped);
+  runAgent: (request: AgentRunRequest): Promise<AgentRunResult> => ipcRenderer.invoke("agent:run", request),
+  runAgentStream: (request: AgentRunStreamRequest): Promise<AgentRunResult> => ipcRenderer.invoke("agent:runStream", request),
+  cancelAgentRun: (request: AgentCancelRequest): Promise<void> => ipcRenderer.invoke("agent:cancel", request),
+  onAgentEvent: (listener: (payload: AgentRunEventPayload) => void): (() => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: AgentRunEventPayload) => listener(payload);
+    ipcRenderer.on("agent:event", wrapped);
+    return () => ipcRenderer.removeListener("agent:event", wrapped);
   },
-  onChatStreamReset: (listener: (event: { id: string }) => void): (() => void) => {
-    const wrapped = (_event: Electron.IpcRendererEvent, payload: { id: string }) => listener(payload);
-    ipcRenderer.on("chat:stream:reset", wrapped);
-    return () => ipcRenderer.removeListener("chat:stream:reset", wrapped);
-  },
-  onShellAuthorizationRequest: (listener: (request: AiShellAuthorizationRequest) => void): (() => void) => {
-    const wrapped = (_event: Electron.IpcRendererEvent, request: AiShellAuthorizationRequest) => listener(request);
-    ipcRenderer.on("shell:authorize:request", wrapped);
-    return () => ipcRenderer.removeListener("shell:authorize:request", wrapped);
-  },
-  respondShellAuthorization: (id: string, allowed: boolean): void => {
-    ipcRenderer.send("shell:authorize:response", { id, allowed });
-  },
-  saveChat: (chat: ChatMessage[]): Promise<ChatMessage[]> => ipcRenderer.invoke("chat:save", chat)
+  executeApprovedAgentTool: (request: AgentToolApprovalRequest): Promise<Record<string, unknown>> =>
+    ipcRenderer.invoke("agent:executeApprovedTool", request),
+  loadAgentChatHistory: (): Promise<AgentChatHistoryRepository> => ipcRenderer.invoke("agent:history:load"),
+  appendAgentChatHistory: (item: AgentChatHistoryItem): Promise<void> => ipcRenderer.invoke("agent:history:append", item),
+  clearAgentChatHistory: (): Promise<void> => ipcRenderer.invoke("agent:history:clear")
 };
 
 contextBridge.exposeInMainWorld("bgt", api);

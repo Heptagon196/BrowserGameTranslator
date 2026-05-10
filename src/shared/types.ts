@@ -3,8 +3,8 @@ export type TextStatus = "extracted" | "translated" | "failed" | "needs_review" 
 export type IssueSeverity = "info" | "warning" | "error";
 export type IssueStatus = "open" | "fixed" | "ignored";
 export type PromptScope = "global" | "workspace";
-export type AiPermissionMode = "restricted" | "workspace" | "full";
 export type AiCostCurrency = "CNY" | "USD";
+export type AiPermissionMode = "restricted" | "workspace" | "unrestricted";
 
 export interface AiBalanceSnapshot {
   providerId: string;
@@ -85,13 +85,6 @@ export interface PreviewStatus {
   url?: string;
 }
 
-export interface AiShellAuthorizationRequest {
-  id: string;
-  command: string;
-  cwd: string;
-  permissionMode: AiPermissionMode;
-}
-
 export interface ProjectConfig {
   schemaVersion: 1;
   projectName: string;
@@ -146,30 +139,21 @@ export interface PromptConfig {
   analysisSystem: string;
   aiLocalizationPlanSystem: string;
   translationSystem: string;
+  proofreadSystem: string;
   translationRules: string[];
-}
-
-export interface TextMetadata {
-  lineBreakCount: number;
-  placeholders: string[];
-  tags: string[];
-  numericPrefix: string | null;
 }
 
 export interface TextItem {
   id: string;
   sourceFile: string;
-  sourceType: "html" | "json" | "js" | "txt" | "csv" | "yaml";
   locator: string;
   original: string;
   translation: string;
   status: TextStatus;
-  originalHash: string;
   context: {
     before?: string;
     after?: string;
   };
-  metadata: TextMetadata;
 }
 
 export interface OriginalSourceFile {
@@ -212,22 +196,18 @@ export interface CharacterEntry {
   givenName?: string;
   givenNameTranslation?: string;
   nicknameOf?: string;
-  category: string;
   note: string;
-  confidence: number;
   enabled: boolean;
-  sourceExamples: string[];
 }
 
 export interface GlossaryEntry {
   id: string;
   source: string;
   target: string;
-  description: string;
+  note: string;
   category: string;
   isRegex: boolean;
   enabled: boolean;
-  sourceExamples: string[];
 }
 
 export interface NoTranslateEntry {
@@ -236,7 +216,6 @@ export interface NoTranslateEntry {
   note: string;
   isRegex: boolean;
   enabled: boolean;
-  sourceExamples: string[];
 }
 
 export interface AnalysisResult {
@@ -245,9 +224,47 @@ export interface AnalysisResult {
   noTranslate: NoTranslateEntry[];
 }
 
+export type ResourceTableType = "characters" | "glossary" | "noTranslate";
+export type DictionaryScope = "global" | "project";
+
+export interface DictionaryTableMeta {
+  schemaVersion: 1;
+  kind: "bgt.resourceTable";
+  id: string;
+  tableType: ResourceTableType;
+  displayName: string;
+  description: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type DictionaryTableRows = CharacterEntry[] | GlossaryEntry[] | NoTranslateEntry[];
+
+export interface DictionaryTable {
+  meta: DictionaryTableMeta;
+  rows: DictionaryTableRows;
+}
+
+export interface DictionaryTableSummary {
+  scope: DictionaryScope | "projectDefault";
+  id: string;
+  tableType: ResourceTableType;
+  displayName: string;
+  description: string;
+  rowCount: number;
+  deletable: boolean;
+}
+
+export interface DictionaryImportResult {
+  status: "cancelled" | "imported" | "conflict";
+  table?: DictionaryTable;
+  existing?: DictionaryTableSummary;
+}
+
 export interface ProofreadOptions {
   languageCheck: boolean;
   targetLanguageRatio: number;
+  characterCheck: boolean;
   glossaryCheck: boolean;
   untranslatedStatusCheck: boolean;
   noTranslateCheck: boolean;
@@ -267,13 +284,116 @@ export interface ProofreadIssue {
   status: IssueStatus;
 }
 
-export interface ChatMessage {
-  id: string;
-  role: "user" | "assistant" | "system";
+export interface AgentRunRequest {
+  input: unknown;
+  provider: ProviderConfig;
+  permissionMode?: AiPermissionMode;
+  context?: {
+    currentView?: string;
+    currentTable?: string;
+    currentTableId?: string;
+    currentTableDescription?: string;
+    projectName?: string;
+  };
+}
+
+export interface AgentRunResult {
+  events: unknown[];
+}
+
+export interface AgentRunStreamRequest extends AgentRunRequest {
+  clientRunId: string;
+}
+
+export interface AgentCancelRequest {
+  clientRunId: string;
+}
+
+export interface AgentRunEventPayload {
+  clientRunId: string;
+  event: unknown;
+}
+
+export interface AgentToolApprovalRequest {
+  toolName: string;
+  args: Record<string, unknown>;
+  permissionMode: AiPermissionMode;
+}
+
+export interface AgentChatHistoryItem {
+  parentId: string | null;
+  message: unknown;
+}
+
+export interface AgentChatHistoryRepository {
+  headId: string | null;
+  messages: AgentChatHistoryItem[];
+}
+
+export interface AgentContextMessage {
+  id?: string;
+  role: "user" | "assistant";
   content: string;
+  createdAt?: string;
+}
+
+export interface AgentModelContext {
+  schemaVersion: 1;
+  updatedAt: string;
+  summary: string;
+  summaryFingerprint?: string;
+  messages: AgentContextMessage[];
+}
+
+export interface AgentCheckpointToolCall {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+  summary?: string;
+  reasoningContent?: string;
+}
+
+export interface AgentCheckpoint {
+  schemaVersion: 1;
+  updatedAt: string;
+  status: "idle" | "pending_approval";
+  runId?: string;
+  parentMessageId?: string;
+  messages?: unknown[];
+  toolCalls: AgentCheckpointToolCall[];
+}
+
+export type AgentTaskStatus = "pending" | "running" | "done" | "failed" | "skipped";
+
+export interface AgentTaskPlanItem {
+  id: string;
+  description: string;
+  status: AgentTaskStatus;
+  evidence?: string;
+  updatedAt: string;
+}
+
+export interface AgentTaskPlan {
+  schemaVersion: 1;
+  updatedAt: string;
+  runId?: string;
+  userGoal: string;
+  needsLookup?: boolean;
+  needsMutation?: boolean;
+  needsUserApproval?: boolean;
+  doneCriteria?: string;
+  plannerSource?: "model" | "fallback";
+  items: AgentTaskPlanItem[];
+}
+
+export interface ProgramAiIoEvent {
+  id: string;
+  title: string;
   createdAt: string;
-  origin?: "user" | "program";
-  kind?: "chat" | "rule" | "program_prompt" | "program_response" | "program_summary";
+  requestMessages: Array<{ role: string; content: string }>;
+  responseContent: string;
+  ok: boolean;
+  error?: string;
 }
 
 export interface CreateProjectInput {
@@ -294,7 +414,6 @@ export interface AppStateSnapshot {
   aiLocalizationPlan: AiLocalizationPlan | null;
   analysis: AnalysisResult;
   issues: ProofreadIssue[];
-  chat: ChatMessage[];
 }
 
 export interface PatchPreview {

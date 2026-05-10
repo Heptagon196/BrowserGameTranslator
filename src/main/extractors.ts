@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { ScanReport, TextItem } from "../shared/types";
-import { sha256, toPosixPath } from "./storage";
+import { toPosixPath } from "./storage";
 
 const includeExts = new Set([".html", ".htm", ".js", ".mjs", ".cjs", ".json", ".txt", ".csv", ".yaml", ".yml"]);
 const excludedNames = new Set(["node_modules", ".git", ".bgt"]);
@@ -218,28 +218,20 @@ async function extractFile(filePath: string, context: ExtractionContext): Promis
   return { items: strategy.extract(input), strategy };
 }
 
-function makeItem(context: ExtractionContext, filePath: string, sourceType: TextItem["sourceType"], locator: string, original: string): TextItem {
+function makeItem(context: ExtractionContext, filePath: string, locator: string, original: string): TextItem {
   return {
     id: context.nextId(),
     sourceFile: toPosixPath(path.relative(context.gameRoot, filePath)),
-    sourceType,
     locator,
     original,
     translation: "",
     status: "extracted",
-    originalHash: sha256(original),
-    context: {},
-    metadata: {
-      lineBreakCount: (original.match(/\n/g) ?? []).length,
-      placeholders: extractPlaceholders(original),
-      tags: extractHtmlTags(original),
-      numericPrefix: original.match(/^\s*(\d+[.)、:：-])/)?.[1] ?? null
-    }
+    context: {}
   };
 }
 
-function makeRangeItem(context: ExtractionContext, filePath: string, sourceType: TextItem["sourceType"], range: SourceRange, original: string): TextItem {
-  return makeItem(context, filePath, sourceType, `range:${range.start}:${range.end}:${range.kind}`, original);
+function makeRangeItem(context: ExtractionContext, filePath: string, range: SourceRange, original: string): TextItem {
+  return makeItem(context, filePath, `range:${range.start}:${range.end}:${range.kind}`, original);
 }
 
 function shouldExtractString(value: string): boolean {
@@ -281,7 +273,7 @@ function extractJsonFile(filePath: string, text: string, context: ExtractionCont
   const items: TextItem[] = [];
   function walk(value: unknown, pathParts: string[]): void {
     if (typeof value === "string") {
-      if (shouldExtractString(value)) items.push(makeItem(context, filePath, "json", toJsonPath(pathParts), value));
+      if (shouldExtractString(value)) items.push(makeItem(context, filePath, `json:${toJsonPath(pathParts)}`, value));
       return;
     }
     if (Array.isArray(value)) {
@@ -305,7 +297,7 @@ function extractHtmlFile(filePath: string, text: string, context: ExtractionCont
   for (const range of scriptScanRanges ?? scriptRanges) {
     const script = text.slice(range.innerStart, range.innerEnd);
     for (const entry of extractJsStrings(script, range.innerStart)) {
-      items.push(makeRangeItem(context, filePath, "js", entry.range, entry.value));
+      items.push(makeRangeItem(context, filePath, entry.range, entry.value));
     }
   }
 
@@ -321,7 +313,7 @@ function extractHtmlFile(filePath: string, text: string, context: ExtractionCont
       if (!shouldExtractString(decoded)) continue;
       const trimmedStart = valueStart + leadingWhitespaceLength(value);
       const trimmedEnd = valueStart + value.length - trailingWhitespaceLength(value);
-      items.push(makeRangeItem(context, filePath, "html", { start: trimmedStart, end: trimmedEnd, kind: "html-attr" }, decoded));
+      items.push(makeRangeItem(context, filePath, { start: trimmedStart, end: trimmedEnd, kind: "html-attr" }, decoded));
     }
     if (tagEnd > tagStart) continue;
   }
@@ -334,7 +326,7 @@ function extractHtmlFile(filePath: string, text: string, context: ExtractionCont
     if (!shouldExtractString(decoded)) continue;
     const trimmedStart = rangeStart + leadingWhitespaceLength(raw);
     const trimmedEnd = rangeStart + raw.length - trailingWhitespaceLength(raw);
-    items.push(makeRangeItem(context, filePath, "html", { start: trimmedStart, end: trimmedEnd, kind: "html-text" }, decoded));
+    items.push(makeRangeItem(context, filePath, { start: trimmedStart, end: trimmedEnd, kind: "html-text" }, decoded));
   }
 
   return uniqueByLocator(items);
@@ -391,7 +383,7 @@ function findJsExpressionEnd(text: string, start: number): number {
 }
 
 function extractJsFile(filePath: string, text: string, context: ExtractionContext): TextItem[] {
-  return extractJsStrings(text, 0).map(({ range, value }) => makeRangeItem(context, filePath, "js", range, value));
+  return extractJsStrings(text, 0).map(({ range, value }) => makeRangeItem(context, filePath, range, value));
 }
 
 function extractJsStrings(text: string, offset: number): Array<{ range: SourceRange; value: string }> {
@@ -488,7 +480,6 @@ function isTechnicalJsValueKey(key: string): boolean {
 }
 
 function extractPlainTextFile(filePath: string, text: string, context: ExtractionContext, ext: string): TextItem[] {
-  const sourceType = ext === ".csv" ? "csv" : ext === ".yaml" || ext === ".yml" ? "yaml" : "txt";
   const items: TextItem[] = [];
   let offset = 0;
   for (const line of text.split(/(\r?\n)/)) {
@@ -500,7 +491,7 @@ function extractPlainTextFile(filePath: string, text: string, context: Extractio
     if (shouldExtractString(trimmed)) {
       const start = offset + leadingWhitespaceLength(line);
       const end = offset + line.length - trailingWhitespaceLength(line);
-      items.push(makeRangeItem(context, filePath, sourceType, { start, end, kind: "plain" }, trimmed));
+      items.push(makeRangeItem(context, filePath, { start, end, kind: "plain" }, trimmed));
     }
     offset += line.length;
   }
@@ -557,21 +548,6 @@ function leadingWhitespaceLength(value: string): number {
 
 function trailingWhitespaceLength(value: string): number {
   return value.length - value.trimEnd().length;
-}
-
-function extractPlaceholders(value: string): string[] {
-  return Array.from(
-    new Set([
-      ...(value.match(/\{[^{}\s]+\}/g) ?? []),
-      ...(value.match(/%\d+/g) ?? []),
-      ...(value.match(/\\[A-Za-z]+\[\d+\]/g) ?? []),
-      ...(value.match(/\{\{[^{}]+\}\}/g) ?? [])
-    ])
-  );
-}
-
-function extractHtmlTags(value: string): string[] {
-  return Array.from(new Set(value.match(/<\/?[a-z][^>]*>/gi) ?? []));
 }
 
 function decodeBasicHtml(value: string): string {

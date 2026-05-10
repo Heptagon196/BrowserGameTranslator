@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { PatchPreview, ProjectConfig, TextItem } from "../shared/types";
-import { projectDirs, projectPaths, readJson, sha256, writeJson } from "./storage";
+import { projectDirs, projectPaths, readJson, writeJson } from "./storage";
 
 type RangeKind = "html-text" | "html-attr" | "js-string" | "js-val-string" | "plain";
 const technicalJsValueKeys = new Set(["action_name", "base", "format", "path", "image", "icon", "sound", "src", "url"]);
@@ -22,7 +22,7 @@ export async function previewPatch(project: ProjectConfig, items: TextItem[]): P
     let replacements = 0;
     for (const item of fileItems) {
       if (!item.translation) continue;
-      if (item.sourceType === "json") {
+      if (isJsonLocator(item.locator)) {
         replacements += 1;
         continue;
       }
@@ -60,10 +60,16 @@ export async function applyPatch(project: ProjectConfig, items: TextItem[]): Pro
     await fs.mkdir(path.dirname(backupPath), { recursive: true });
     await fs.copyFile(originalPath, backupPath);
 
-    const nextContent =
-      fileItems[0]?.sourceType === "json"
-        ? applyJsonTranslations(originalContent, fileItems, preview.blocked)
-        : applyRangeTranslations(originalContent, fileItems, preview.blocked);
+    const jsonItems = fileItems.filter((item) => isJsonLocator(item.locator));
+    const rangeItems = fileItems.filter((item) => parseRangeLocator(item.locator));
+    let nextContent = originalContent;
+    if (jsonItems.length) nextContent = applyJsonTranslations(nextContent, jsonItems, preview.blocked);
+    if (rangeItems.length) nextContent = applyRangeTranslations(nextContent, rangeItems, preview.blocked);
+    for (const item of fileItems) {
+      if (!isJsonLocator(item.locator) && !parseRangeLocator(item.locator)) {
+        preview.blocked.push({ textItemId: item.id, reason: "缺少可回填的定位，已跳过。" });
+      }
+    }
     await fs.mkdir(path.dirname(fullPath), { recursive: true });
     await fs.writeFile(fullPath, nextContent, "utf8");
   }
@@ -137,7 +143,7 @@ function applyRangeTranslations(content: string, items: TextItem[], blocked: Pat
       continue;
     }
     const decoded = decodeRange(raw, locator.kind);
-    if (sha256(item.original) !== item.originalHash || decoded !== item.original) {
+    if (decoded !== item.original) {
       blocked.push({ textItemId: item.id, reason: "原始范围校验失败，已跳过。" });
       continue;
     }
@@ -203,10 +209,6 @@ function encodeRangeReplacement(value: string, raw: string, kind: RangeKind): st
 function applyJsonTranslations(content: string, items: TextItem[], blocked: PatchPreview["blocked"]): string {
   const json = JSON.parse(content) as unknown;
   for (const item of items) {
-    if (sha256(item.original) !== item.originalHash) {
-      blocked.push({ textItemId: item.id, reason: "原文 hash 不一致，已跳过。" });
-      continue;
-    }
     if (!setJsonPath(json, item.locator, item.translation)) {
       blocked.push({ textItemId: item.id, reason: "JSON 路径不存在，已跳过。" });
     }
@@ -226,14 +228,19 @@ function setJsonPath(root: unknown, locator: string, value: string): boolean {
 }
 
 function parseJsonPath(locator: string): string[] {
-  if (locator === "$") return [];
+  const pathLocator = locator.startsWith("json:") ? locator.slice("json:".length) : locator;
+  if (pathLocator === "$") return [];
   const parts: string[] = [];
   const pattern = /\[(?:"((?:\\.|[^"\\])*)"|(\d+))\]/g;
-  for (const match of locator.matchAll(pattern)) {
+  for (const match of pathLocator.matchAll(pattern)) {
     if (match[2]) parts.push(match[2]);
     else parts.push(JSON.parse(`"${match[1] ?? ""}"`) as string);
   }
   return parts;
+}
+
+function isJsonLocator(locator: string): boolean {
+  return locator.startsWith("json:");
 }
 
 function decodeBasicHtml(value: string): string {

@@ -1,37 +1,29 @@
 ﻿import React, { useState } from "react";
 import { Play } from "lucide-react";
-import type { AiBalanceSnapshot, AiPermissionMode, AppStateSnapshot, ChatMessage, ProviderConfig } from "../../shared/types";
+import type { AiBalanceSnapshot, AppStateSnapshot, ProviderConfig } from "../../shared/types";
 import { TextTable, type TableSettings } from "../components/table/DataTable";
 import { ProgressBar } from "../components/ui/Primitives";
-import { buildProgramTranslationPromptPreview, buildProgramTranslationSystemPromptPreview, chunk, formatDeepSeekBalance, replaceItem } from "../appUtils";
+import { chunk, formatDeepSeekBalance, replaceItem } from "../appUtils";
 import { defaultParallelBatchLimit } from "../settingsModel";
 export default function TranslateView({
   busy,
   snapshot,
   provider,
   aiBalance,
-  chatProvider,
   run,
   setSnapshot,
   setTranslationBusy,
-  saveChat,
   snapshotRef,
-  setChatBusy,
-  aiPermissionMode,
   tableSettings
 }: {
   busy: boolean;
   snapshot: AppStateSnapshot;
   provider?: ProviderConfig;
   aiBalance: AiBalanceSnapshot | null;
-  chatProvider?: ProviderConfig;
   run: <T>(message: string, task: () => Promise<T>, onDone?: (value: T) => void) => Promise<T | undefined>;
   setSnapshot: React.Dispatch<React.SetStateAction<AppStateSnapshot>>;
   setTranslationBusy: React.Dispatch<React.SetStateAction<boolean>>;
-  saveChat: (chat: ChatMessage[]) => Promise<void>;
   snapshotRef: React.MutableRefObject<AppStateSnapshot>;
-  setChatBusy: React.Dispatch<React.SetStateAction<boolean>>;
-  aiPermissionMode: AiPermissionMode;
   tableSettings: TableSettings;
 }) {
   const [translationProgress, setTranslationProgress] = useState({ running: false, processed: 0, translated: 0, total: 0 });
@@ -51,23 +43,6 @@ export default function TranslateView({
       : "";
   const progressValue = translationProgress.running && translationProgress.total ? Math.min(100, (translationProgress.processed / translationProgress.total) * 100) : 0;
 
-  const processUserMessagesSince = async (provider: ProviderConfig, sinceIndex: number) => {
-    const current = snapshotRef.current.chat;
-    const pending = current.slice(sinceIndex).filter((message) => message.role === "user");
-    if (!pending.length) return;
-    if (!provider.apiKey) return;
-    setChatBusy(true);
-    try {
-      const reply = await window.bgt.replyChat(provider, current, aiPermissionMode);
-      await saveChat([...snapshotRef.current.chat, { ...reply, origin: "user", kind: "chat" }]);
-      const refreshed = await window.bgt.refreshProject();
-      snapshotRef.current = refreshed;
-      setSnapshot(refreshed);
-    } finally {
-      setChatBusy(false);
-    }
-  };
-
   const startBatchTranslation = async () => {
     if (!provider || !snapshot.project) return;
     const project = snapshot.project;
@@ -78,45 +53,16 @@ export default function TranslateView({
       setTranslationProgress({ running: activeItems.length > 0, processed: 0, translated: 0, total: activeItems.length });
       const batches = chunk(activeItems, 20);
       let workingItems = allItems;
-      let pendingUserStart = snapshotRef.current.chat.length;
       let nextBatchIndex = 0;
       let firstError: unknown = null;
       const translationSettings = provider.modelSettings?.[provider.model] ?? {};
       const configuredConcurrency = translationSettings.parallelBatchLimit ?? provider.parallelBatchLimit ?? defaultParallelBatchLimit;
       const concurrency = Math.min(batches.length, Math.max(1, Math.floor(Number(configuredConcurrency) || defaultParallelBatchLimit)));
       const inFlight = new Set<Promise<void>>();
-      let chatWrite = Promise.resolve();
-
-      const appendProgramIoPair = async (promptMessage: ChatMessage, responseMessage: ChatMessage) => {
-        chatWrite = chatWrite.then(() => saveChat([...snapshotRef.current.chat, promptMessage, responseMessage])).then(() => undefined);
-        await chatWrite;
-      };
-
-      const processPendingUserInput = async () => {
-        const currentChat = snapshotRef.current.chat;
-        const hasPendingUser = currentChat.slice(pendingUserStart).some((message) => message.role === "user");
-        if (!hasPendingUser) return;
-        await processUserMessagesSince(chatProvider ?? provider, pendingUserStart);
-        pendingUserStart = snapshotRef.current.chat.length;
-        workingItems = snapshotRef.current.textItems;
-      };
 
       const runBatch = async (index: number) => {
         const batch = batches[index];
-        const prompts = await window.bgt.loadEffectivePrompts();
-        const promptMessage: ChatMessage = {
-          id: `msg_${Date.now()}_${index}_prompt`,
-          role: "system",
-          origin: "program",
-          kind: "program_prompt",
-          createdAt: new Date().toISOString(),
-          content: [
-            `翻译批次 ${index + 1}/${batches.length}`,
-            `System:\n${buildProgramTranslationSystemPromptPreview(batch, prompts, project.sourceLanguage, project.targetLanguage, snapshotRef.current.analysis)}`,
-            `User:\n${buildProgramTranslationPromptPreview(batch)}`
-          ].join("\n\n")
-        };
-        const translatedBatch = await window.bgt.translateBatch(provider, project.targetLanguage, snapshotRef.current.chat, batch);
+        const translatedBatch = await window.bgt.translateBatch(provider, project.targetLanguage, batch);
         const byId = new Map(translatedBatch.map((item) => [item.id, item]));
         workingItems = workingItems.map((item) => byId.get(item.id) ?? item);
         await window.bgt.saveTextItems(workingItems);
@@ -126,19 +72,6 @@ export default function TranslateView({
           processed: Math.min(current.total, current.processed + batch.length),
           translated: Math.min(current.total, current.translated + translatedBatch.filter((item) => item.translation.trim() && item.status !== "excluded").length)
         }));
-        const responseMessage: ChatMessage = {
-          id: `msg_${Date.now()}_${index}_response`,
-          role: "assistant",
-          origin: "program",
-          kind: "program_response",
-          createdAt: new Date().toISOString(),
-          content: JSON.stringify(
-            translatedBatch.map((item) => ({ id: item.id, translation: item.translation, status: item.status })),
-            null,
-            2
-          )
-        };
-        await appendProgramIoPair(promptMessage, responseMessage);
       };
 
       const launchNextBatch = () => {
@@ -158,11 +91,8 @@ export default function TranslateView({
       while (nextBatchIndex < batches.length && inFlight.size < concurrency) launchNextBatch();
       while (inFlight.size) {
         await Promise.race(Array.from(inFlight));
-        await chatWrite;
-        await processPendingUserInput();
         while (!firstError && nextBatchIndex < batches.length && inFlight.size < concurrency) launchNextBatch();
       }
-      await chatWrite;
       if (firstError) throw firstError;
     } finally {
       setTranslationBusy(false);
@@ -195,7 +125,7 @@ export default function TranslateView({
         onTranslateItems={
           provider
             ? async (selectedItems) => {
-                const translated = await window.bgt.translateBatch(provider, snapshot.project?.targetLanguage ?? "zh-CN", snapshotRef.current.chat, selectedItems);
+                const translated = await window.bgt.translateBatch(provider, snapshot.project?.targetLanguage ?? "zh-CN", selectedItems);
                 const byId = new Map(translated.map((item) => [item.id, item]));
                 const nextItems = snapshotRef.current.textItems.map((item) => byId.get(item.id) ?? item);
                 const saved = await window.bgt.saveTextItems(nextItems);

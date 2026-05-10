@@ -52,11 +52,11 @@ function buildProgramResourceSections(batch: TextItem[], analysis: AnalysisResul
   const sections: string[] = [];
   const characters = analysis.characters.filter((entry) => entry.enabled && entry.source && sourceText.includes(entry.source));
   if (characters.length) {
-    sections.push(["###角色表", "原文|译文|备注", ...characters.slice(0, 80).map((entry) => `${entry.source}|${entry.target || "待定"}|${entry.note || entry.category}`)].join("\n"));
+    sections.push(["###角色表", "原文|译文|备注", ...characters.slice(0, 80).map((entry) => `${entry.source}|${entry.target || "待定"}|${entry.note}`)].join("\n"));
   }
   const terms = analysis.glossary.filter((entry) => entry.enabled && entry.source && sourceText.includes(entry.source));
   if (terms.length) {
-    sections.push(["###术语表", "原文|译文|备注", ...terms.slice(0, 120).map((entry) => `${entry.source}|${entry.target || "待定"}|${entry.description || entry.category}`)].join("\n"));
+    sections.push(["###术语表", "原文|译文|备注", ...terms.slice(0, 120).map((entry) => `${entry.source}|${entry.target || "待定"}|${entry.note || entry.category}`)].join("\n"));
   }
   const noTranslate = analysis.noTranslate.filter((entry) => entry.enabled && entry.marker && sourceText.includes(entry.marker));
   if (noTranslate.length) {
@@ -68,6 +68,7 @@ function buildProgramResourceSections(batch: TextItem[], analysis: AnalysisResul
 export function ruleLabel(key: string): string {
   return {
     languageCheck: "语言比例检查",
+    characterCheck: "人物检查",
     glossaryCheck: "术语检查",
     untranslatedStatusCheck: "未翻译状态",
     noTranslateCheck: "禁翻表",
@@ -75,6 +76,18 @@ export function ruleLabel(key: string): string {
     lineBreakCheck: "换行符数量",
     placeholderCheck: "占位符",
     htmlTagCheck: "HTML 标签",
-    emptyTranslationCheck: "空译文"
+    emptyTranslationCheck: "空译文",
+    character_missing: "人物缺失",
+    glossary_missing: "术语缺失",
+    untranslated_status: "未翻译状态",
+    empty_translation: "空译文",
+    language_ratio: "语言比例",
+    line_break_count: "换行符数量",
+    placeholder_residue: "占位符残留",
+    placeholder_missing: "占位符缺失",
+    html_tag_missing: "HTML 标签缺失",
+    numeric_residue: "数字序号残留",
+    no_translate_missing: "禁翻表缺失",
+    auto_process_missing: "自动处理缺失"
   }[key] ?? key;
 }

@@ -125,11 +125,6 @@ export default function ToolsView({ run }: { run: <T>(message: string, task: () 
             )}
           </div>
         )}
-        <div className="button-row modal-actions">
-          <button className="secondary-button" onClick={() => setItchModalOpen(false)}>
-            关闭
-          </button>
-        </div>
       </AppDialog>
       <button className="panel tool-entry" onClick={() => setAaModalOpen(true)}>
         <Download size={22} />
@@ -222,11 +217,6 @@ export default function ToolsView({ run }: { run: <T>(message: string, task: () 
             )}
           </div>
         )}
-        <div className="button-row modal-actions">
-          <button className="secondary-button" onClick={() => setAaModalOpen(false)}>
-            关闭
-          </button>
-        </div>
       </AppDialog>
     </div>
   );

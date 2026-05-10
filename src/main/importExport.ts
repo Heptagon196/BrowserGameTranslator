@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { dialog } from "electron";
 import { ProjectConfig, TextItem } from "../shared/types";
-import { projectDirs, projectPaths, readJsonl, writeJsonl } from "./storage";
+import { projectDirs, projectPaths, readJsonl, sha256, writeJsonl } from "./storage";
 
 export async function exportTextItems(project: ProjectConfig, items: TextItem[], format: "jsonl" | "csv"): Promise<string | null> {
   const result = await dialog.showSaveDialog({
@@ -31,9 +31,10 @@ export async function importTextItems(project: ProjectConfig): Promise<TextItem[
   const current = await readJsonl<TextItem>(projectPaths(project).textItems);
   const incoming = filePath.toLowerCase().endsWith(".csv") ? await fromCsv(filePath) : await readJsonl<Partial<TextItem>>(filePath);
   const byId = new Map(current.map((item) => [item.id, item]));
-  const byHash = new Map(current.map((item) => [`${item.originalHash}|${item.sourceFile}|${item.locator}`, item]));
+  const byHash = new Map(current.map((item) => [`${sha256(item.original)}|${item.sourceFile}|${item.locator}`, item]));
   for (const row of incoming) {
-    const match = (row.id && byId.get(row.id)) || byHash.get(`${row.originalHash}|${row.sourceFile}|${row.locator}`);
+    const rowHash = row.original ? sha256(row.original) : "";
+    const match = (row.id && byId.get(row.id)) || byHash.get(`${rowHash}|${row.sourceFile}|${row.locator}`);
     if (match) {
       match.translation = String(row.translation ?? match.translation ?? "");
       match.status = match.translation ? "translated" : match.status;

@@ -42,6 +42,18 @@ export const defaultPrompts = (): PromptConfig => ({
       "请根据术语表、禁翻表和用户规则，把 textarea 中的原文逐行翻译为目标语言。",
       "译文必须保留原来的数字序号格式，并只输出一个 textarea。"
     ].join("\n"),
+  proofreadSystem:
+    [
+      "你是一名专业的翻译校对员。你将收到若干条网页游戏本地化校对任务，每条任务包含问题类型、问题说明、原文和当前译文。",
+      "你的唯一任务是输出校对修改后的最终译文。",
+      "关键规则：",
+      "1. 只输出合法 JSON 数组，不要输出解释、道歉、Markdown 或代码块。",
+      "2. JSON 数组中的每一项必须包含 id 和 translation，id 必须原样使用输入中的 id。",
+      "3. 严格保留原文中的占位符、变量、标签、转义字符、换行符和特殊格式。",
+      "4. 如果当前译文为空、缺失或质量极差，请直接根据原文重新翻译。",
+      "5. 如果当前译文没有问题，请原样返回当前译文。",
+      "输出格式示例：[{\"id\":\"txt_000001\",\"translation\":\"校对后的译文\"}]"
+    ].join("\n"),
   translationRules: []
 });
 
@@ -79,6 +91,10 @@ export async function loadEffectivePrompts(project?: ProjectConfig): Promise<Pro
   return loadPrompts("global");
 }
 
+export function loadDefaultPrompts(): PromptConfig {
+  return defaultPrompts();
+}
+
 function mergePrompts(prompts: Partial<PromptConfig>): PromptConfig {
   const defaults = defaultPrompts();
   return {
@@ -86,6 +102,7 @@ function mergePrompts(prompts: Partial<PromptConfig>): PromptConfig {
     analysisSystem: stringPrompt(prompts.analysisSystem, defaults.analysisSystem),
     aiLocalizationPlanSystem: stringPrompt(prompts.aiLocalizationPlanSystem, defaults.aiLocalizationPlanSystem),
     translationSystem: stringPrompt(prompts.translationSystem, defaults.translationSystem),
+    proofreadSystem: stringPrompt(prompts.proofreadSystem, defaults.proofreadSystem),
     translationRules: Array.isArray(prompts.translationRules) ? prompts.translationRules.map(String) : []
   };
 }

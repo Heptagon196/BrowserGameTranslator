@@ -32,8 +32,6 @@ resources/
   launcher/      内置 Windows 启动器
 tools/
   launcher/      C/Win32 启动器源码
-docs/
-  browser-game-ai-translator-design.md
 ```
 
 ## 工作区规则
@@ -143,21 +141,12 @@ tools/launcher/main.c
 
 用户解压后双击启动器 exe 即可启动本地服务器并打开游戏。
 
-## 设计文档
-
-完整设计见：
-
-```text
-docs/browser-game-ai-translator-design.md
-```
-
 ## 注意事项
 
 - 本工具面向已经合法下载到本地的网页游戏，不负责绕过 DRM、登录、付费或服务端资源限制。
 - AI 请求会把待处理文本发送到用户配置的服务商，请在使用前确认文本和 Key 管理策略。
 - 当前没有安装包构建配置；`npm run build` 只生成 Electron 主进程和前端构建产物。
 
-## 参考与许可
+## 参考
 
-- 翻译提示词、术语/禁翻表组织方式、部分校对规则参考 AiNiee：`https://github.com/NEKOparapa/AiNiee`。
-- AiNiee 使用 GNU AGPLv3 许可证。若继续分发包含这些提示词和规则衍生实现的版本，需要一并处理 AGPLv3 的合规要求。
+- 特别感谢 [AiNiee](https://github.com/NEKOparapa/AiNiee)。本项目的翻译提示词、术语/禁翻表组织方式和部分校对规则参考了 AiNiee 的设计与实现。

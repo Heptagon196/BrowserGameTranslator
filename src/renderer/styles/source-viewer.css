@@ -1,7 +1,7 @@
 ﻿.source-file-modal {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   height: min(780px, calc(100vh - 48px));
   max-width: 1180px;
   overflow: hidden;
@@ -13,6 +13,7 @@
   display: flex;
   gap: 16px;
   justify-content: space-between;
+  padding-right: 44px;
 }
 
 .source-file-actions {
@@ -41,8 +42,7 @@
   white-space: nowrap;
 }
 
-.source-file-meta strong,
-.source-file-meta span {
+.source-file-meta strong {
   display: block;
 }
 
@@ -50,10 +50,8 @@
   overflow-wrap: anywhere;
 }
 
-.source-file-meta span {
-  color: #60717c;
-  font-size: 12px;
-  margin-top: 4px;
+.source-file-meta {
+  min-width: 0;
 }
 
 .source-file-keys {
@@ -64,6 +62,49 @@
   gap: 6px;
   justify-content: flex-end;
   min-width: 0;
+}
+
+.source-file-keys.under-title {
+  justify-content: flex-start;
+  margin-top: 8px;
+}
+
+.source-file-keys.single {
+  flex: 0 0 auto;
+}
+
+.source-file-key-select-wrap {
+  display: flex;
+  flex: 0 1 380px;
+  flex-wrap: nowrap;
+  max-width: 460px;
+}
+
+.source-file-key-select-wrap .command-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+}
+
+.source-file-key-nav-button {
+  align-items: center;
+  background: #e8f4f6;
+  border: 1px solid #c7dce1;
+  border-radius: 7px;
+  color: #245c66;
+  display: inline-flex;
+  flex: 0 0 34px;
+  height: 34px;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0;
+  width: 34px;
+}
+
+.source-file-key-nav-button:hover {
+  background: #d9edf2;
+  border-color: #9fc6ce;
+  color: #174e57;
 }
 
 .source-file-key-chip {
@@ -183,7 +224,7 @@
 .source-file-editor .cm-content {
   caret-color: transparent;
   min-height: 100%;
-  padding: 10px 0 18px;
+  padding: 10px 0 74px;
 }
 
 .source-file-editor .cm-line {
@@ -208,43 +249,245 @@
 }
 
 .source-file-editor .cm-selectionBackground,
+.source-file-editor .cm-focused .cm-selectionBackground,
+.source-file-editor .cm-line::selection,
+.source-file-editor .cm-line *::selection {
+  background: rgba(47, 125, 137, 0.35) !important;
+}
+
+.source-file-editor .cm-content ::selection {
+  background: rgba(47, 125, 137, 0.35) !important;
+}
+
 .source-file-editor .cm-focused .cm-selectionBackground {
-  background: rgba(85, 170, 190, 0.28);
+  outline: 1px solid rgba(47, 125, 137, 0.45);
+}
+
+.source-file-editor .cm-panels {
+  background: transparent;
+  border: 0;
+  color: #17242d;
+  z-index: 4;
+}
+
+.source-file-editor .cm-panels-bottom {
+  border-top: 1px solid #dce2e8;
+  box-sizing: border-box;
+  max-width: calc(100% - 18px);
+  width: auto !important;
 }
 
 .source-file-editor .cm-search {
-  background: #f3f7f9;
-  border-bottom: 1px solid #dce2e8;
-  color: #17242d;
-  padding: 8px;
-}
-
-.source-file-editor .cm-search input {
-  background: #ffffff;
-  border: 1px solid #bfd0d8;
-  border-radius: 6px;
-  color: #17242d;
-  height: 30px;
-  padding: 0 8px;
-}
-
-.source-file-editor .cm-search button {
-  background: #2f7d89;
+  align-items: center;
+  background: #f7fafb;
   border: 0;
-  border-radius: 6px;
-  color: #ffffff;
-  cursor: pointer;
-  font-weight: 800;
-  height: 30px;
-  margin-left: 6px;
+  box-sizing: border-box;
+  color: #17242d;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  min-height: 48px;
+  overflow: hidden;
+  padding: 7px 10px;
+  position: relative;
+  white-space: nowrap;
+  width: 100%;
+}
+
+.source-file-editor .cm-search::after {
+  content: "";
+  flex: 0 0 24px;
+  order: 9;
+}
+
+.source-file-editor .cm-search input[name="search"] {
+  background: #ffffff;
+  border: 1px solid #cbd7de;
+  border-radius: 7px;
+  color: #17242d;
+  flex: 1 1 160px;
+  height: 32px;
+  min-width: 40px;
+  order: 1;
   padding: 0 10px;
 }
 
+.source-file-editor .cm-search input[name="search"]:focus {
+  border-color: #2f7d89;
+  box-shadow: 0 0 0 3px rgba(47, 125, 137, 0.14);
+  outline: none;
+}
+
+.source-file-editor .cm-search button {
+  align-items: center !important;
+  background: #2f7d89;
+  border: 0;
+  border-radius: 7px;
+  color: #ffffff;
+  cursor: pointer;
+  display: inline-flex !important;
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 800;
+  height: 32px;
+  justify-content: center !important;
+  line-height: 32px;
+  margin: 0;
+  min-height: 32px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-file-editor .cm-search button:hover {
+  background: #266a74;
+}
+
+.source-file-editor .cm-search button[name="close"] {
+  display: none;
+}
+
+.source-file-editor .cm-search button[name="select"] {
+  display: none !important;
+}
+
+.source-file-editor .cm-search button[name="next"],
+.source-file-editor .cm-search button[name="prev"] {
+  font-size: 0;
+  padding: 0;
+  width: 34px;
+}
+
+.source-file-editor .cm-search button[name="prev"] {
+  order: 2;
+}
+
+.source-file-editor .cm-search button[name="next"] {
+  order: 3;
+}
+
+.source-file-editor .cm-search button[name="next"]::before,
+.source-file-editor .cm-search button[name="prev"]::before {
+  border: solid currentColor;
+  border-width: 0 2px 2px 0;
+  content: "";
+  display: block;
+  height: 8px;
+  width: 8px;
+}
+
+.source-file-editor .cm-search button[name="next"]::before {
+  margin-left: -3px;
+  transform: rotate(-45deg);
+}
+
+.source-file-editor .cm-search button[name="prev"]::before {
+  margin-right: -3px;
+  transform: rotate(135deg);
+}
+
 .source-file-editor .cm-search label {
-  align-items: center;
+  align-items: center !important;
+  color: transparent !important;
+  display: inline-flex !important;
+  flex-direction: row !important;
+  flex: 0 0 auto;
+  font-size: 0 !important;
+  font-weight: 700;
+  gap: 6px;
+  height: 32px;
+  line-height: 0 !important;
+  margin: 0;
+  order: 4;
+  white-space: nowrap;
+}
+
+.source-file-editor .cm-search label input[type="checkbox"] {
+  order: 0;
+}
+
+.source-file-editor .cm-search label:nth-of-type(1)::before,
+.source-file-editor .cm-search label:nth-of-type(2)::before,
+.source-file-editor .cm-search label:nth-of-type(3)::before {
+  color: #52636e;
   display: inline-flex;
-  gap: 4px;
-  margin-left: 8px;
+  font-size: 12px;
+  line-height: 17px;
+  order: 1;
+}
+
+.source-file-editor .cm-search label:nth-of-type(1)::before {
+  content: "区分大小写";
+}
+
+.source-file-editor .cm-search label:nth-of-type(2)::before {
+  content: "正则";
+}
+
+.source-file-editor .cm-search label:nth-of-type(3)::before {
+  content: "整词";
+}
+
+.source-file-editor .cm-search label input[type="checkbox"] {
+  appearance: none;
+  background: #ffffff;
+  border: 1px solid #b9c8d0;
+  border-radius: 5px;
+  height: 17px;
+  margin: 0;
+  min-width: 17px;
+  padding: 0;
+  position: relative;
+  width: 17px;
+}
+
+.source-file-editor .cm-search label input[type="checkbox"]:checked {
+  background: #2f7d89;
+  border-color: #2f7d89;
+}
+
+.source-file-editor .cm-search label input[type="checkbox"]:checked::after {
+  border: solid #ffffff;
+  border-width: 0 2px 2px 0;
+  content: "";
+  height: 7px;
+  left: 6px;
+  position: absolute;
+  top: 3px;
+  transform: rotate(45deg);
+  width: 4px;
+}
+
+.source-file-editor .cm-search .cm-textfield {
+  font: inherit;
+}
+
+.source-file-footer {
+  align-items: center;
+  color: #60717c;
+  display: flex;
+  flex: 0 0 auto;
+  font-size: 12px;
+  gap: 12px;
+  justify-content: space-between;
+  min-height: 34px;
+}
+
+.source-file-footer span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-file-footer button {
+  flex: 0 0 auto;
+}
+
+.source-file-footer button.active {
+  background: #dcecef;
+  color: #1f6f78;
 }
 
 .bgt-source-highlight {

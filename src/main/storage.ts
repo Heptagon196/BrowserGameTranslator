@@ -5,10 +5,14 @@ import {
   AnalysisResult,
   AppStateSnapshot,
   AiLocalizationPlan,
-  ChatMessage,
+  CharacterEntry,
+  DictionaryTableMeta,
+  GlossaryEntry,
+  NoTranslateEntry,
   ProjectConfig,
   ProviderConfig,
   ProofreadIssue,
+  ResourceTableType,
   ScanReport,
   TextItem
 } from "../shared/types";
@@ -33,11 +37,58 @@ export async function ensureProjectDirs(project: ProjectConfig): Promise<void> {
     fs.mkdir(dirs.originalRoot, { recursive: true }),
     fs.mkdir(path.join(dirs.bgtRoot, "extracted"), { recursive: true }),
     fs.mkdir(path.join(dirs.bgtRoot, "resources"), { recursive: true }),
+    fs.mkdir(path.join(dirs.bgtRoot, "dictionaries"), { recursive: true }),
     fs.mkdir(path.join(dirs.bgtRoot, "translations"), { recursive: true }),
     fs.mkdir(path.join(dirs.bgtRoot, "qa"), { recursive: true }),
     fs.mkdir(path.join(dirs.bgtRoot, "patches", "backup"), { recursive: true }),
     fs.mkdir(path.join(dirs.bgtRoot, "logs"), { recursive: true })
   ]);
+  await ensureBgtGitignore(project);
+}
+
+export async function ensureBgtGitignore(project: ProjectConfig): Promise<void> {
+  const filePath = path.join(projectDirs(project).bgtRoot, ".gitignore");
+  const defaults = defaultBgtGitignoreLines();
+  try {
+    const existing = await fs.readFile(filePath, "utf8");
+    const existingLines = new Set(existing.split(/\r?\n/).map((line) => line.trim()));
+    const requiredPatterns = defaults.filter((line) => line.trim() && !line.trim().startsWith("#"));
+    const missing = requiredPatterns.filter((line) => !existingLines.has(line));
+    if (missing.length) {
+      const prefix = existing.endsWith("\n") ? "\n" : "\n\n";
+      await fs.appendFile(filePath, `${prefix}# BrowserGameTranslator local runtime files\n${missing.join("\n")}\n`, "utf8");
+    }
+  } catch {
+    await fs.writeFile(filePath, `${defaults.join("\n")}\n`, "utf8");
+  }
+}
+
+function defaultBgtGitignoreLines(): string[] {
+  return [
+    "# BrowserGameTranslator local runtime files",
+    "",
+    "# AI chat/session state is local to each collaborator.",
+    "/logs/ai-chat.jsonl",
+    "/logs/ai-context.json",
+    "/logs/agent-checkpoint.json",
+    "/logs/agent-task-plan.json",
+    "/logs/tasks.log",
+    "/logs/*.log",
+    "",
+    "# Packaging and temporary work directories are regenerated locally.",
+    "/package-temp/",
+    "/package-staging/",
+    "/package-output/",
+    "",
+    "# Patch backups are local safety copies; keep patch-manifest.json if you need to share applied patch metadata.",
+    "/patches/backup/",
+    "",
+    "# OS/editor noise.",
+    ".DS_Store",
+    "Thumbs.db",
+    "*.tmp",
+    "*.bak"
+  ];
 }
 
 export async function readJson<T>(filePath: string, fallback: T): Promise<T> {
@@ -71,6 +122,31 @@ export async function writeJsonl<T>(filePath: string, rows: T[]): Promise<void> 
   await fs.writeFile(filePath, body ? `${body}\n` : "", "utf8");
 }
 
+function isResourceTableMeta(value: unknown): value is DictionaryTableMeta {
+  return Boolean(value && typeof value === "object" && (value as DictionaryTableMeta).kind === "bgt.resourceTable");
+}
+
+export async function readResourceJsonl<T>(filePath: string): Promise<{ meta: DictionaryTableMeta | null; rows: T[] }> {
+  try {
+    const text = await fs.readFile(filePath, "utf8");
+    const values = text
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as unknown);
+    const first = values[0];
+    const meta = isResourceTableMeta(first) ? first : null;
+    return { meta, rows: (meta ? values.slice(1) : values) as T[] };
+  } catch {
+    return { meta: null, rows: [] };
+  }
+}
+
+export async function writeResourceJsonl<T>(filePath: string, meta: DictionaryTableMeta, rows: T[]): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const body = [meta, ...rows].map((row) => JSON.stringify(row)).join("\n");
+  await fs.writeFile(filePath, body ? `${body}\n` : "", "utf8");
+}
+
 export function projectDirs(project: ProjectConfig) {
   const projectRoot = path.resolve(project.projectRoot);
   const bgtRoot = path.join(projectRoot, ".bgt");
@@ -91,18 +167,41 @@ export const projectPaths = (project: ProjectConfig) => {
     characters: path.join(dirs.bgtRoot, "resources", "characters.jsonl"),
     glossary: path.join(dirs.bgtRoot, "resources", "glossary.jsonl"),
     noTranslate: path.join(dirs.bgtRoot, "resources", "no-translate.jsonl"),
+    dictionaries: path.join(dirs.bgtRoot, "dictionaries"),
     issues: path.join(dirs.bgtRoot, "qa", "issues.jsonl"),
-    chat: path.join(dirs.bgtRoot, "logs", "ai-chat.jsonl"),
+    aiChat: path.join(dirs.bgtRoot, "logs", "ai-chat.jsonl"),
+    aiContext: path.join(dirs.bgtRoot, "logs", "ai-context.json"),
+    agentCheckpoint: path.join(dirs.bgtRoot, "logs", "agent-checkpoint.json"),
+    agentTaskPlan: path.join(dirs.bgtRoot, "logs", "agent-task-plan.json"),
     patchManifest: path.join(dirs.bgtRoot, "patches", "patch-manifest.json")
   };
 };
 
+export function defaultResourceTableMeta(project: ProjectConfig, tableType: ResourceTableType): DictionaryTableMeta {
+  const now = new Date().toISOString();
+  const labels: Record<ResourceTableType, string> = {
+    characters: "项目人物表",
+    glossary: "项目术语表",
+    noTranslate: "项目禁翻表"
+  };
+  return {
+    schemaVersion: 1,
+    kind: "bgt.resourceTable",
+    id: `project.${tableType}`,
+    tableType,
+    displayName: labels[tableType],
+    description: `${project.projectName} 的默认${labels[tableType].replace("项目", "")}`,
+    createdAt: project.createdAt || now,
+    updatedAt: now
+  };
+}
+
 export async function loadSnapshot(project: ProjectConfig): Promise<AppStateSnapshot> {
   const paths = projectPaths(project);
   const analysis = emptyAnalysis();
-  analysis.characters = await readJsonl(paths.characters);
-  analysis.glossary = await readJsonl(paths.glossary);
-  analysis.noTranslate = await readJsonl(paths.noTranslate);
+  analysis.characters = (await readResourceJsonl<CharacterEntry>(paths.characters)).rows;
+  analysis.glossary = (await readResourceJsonl<GlossaryEntry>(paths.glossary)).rows;
+  analysis.noTranslate = (await readResourceJsonl<NoTranslateEntry>(paths.noTranslate)).rows;
   return {
     project,
     providers: [] as ProviderConfig[],
@@ -113,18 +212,26 @@ export async function loadSnapshot(project: ProjectConfig): Promise<AppStateSnap
     scanReport: await readJson<ScanReport | null>(paths.scanReport, null),
     aiLocalizationPlan: await readJson<AiLocalizationPlan | null>(paths.aiLocalizationPlan, null),
     analysis,
-    issues: await readJsonl<ProofreadIssue>(paths.issues),
-    chat: await readJsonl<ChatMessage>(paths.chat)
+    issues: await readJsonl<ProofreadIssue>(paths.issues)
   };
 }
 
 export async function saveAnalysis(project: ProjectConfig, analysis: AnalysisResult): Promise<void> {
   const paths = projectPaths(project);
-  await Promise.all([
-    writeJsonl(paths.characters, analysis.characters),
-    writeJsonl(paths.glossary, analysis.glossary),
-    writeJsonl(paths.noTranslate, analysis.noTranslate)
+  const [charactersMeta, glossaryMeta, noTranslateMeta] = await Promise.all([
+    readResourceJsonl<CharacterEntry>(paths.characters),
+    readResourceJsonl<GlossaryEntry>(paths.glossary),
+    readResourceJsonl<NoTranslateEntry>(paths.noTranslate)
   ]);
+  await Promise.all([
+    writeResourceJsonl(paths.characters, updateResourceMeta(charactersMeta.meta ?? defaultResourceTableMeta(project, "characters")), analysis.characters),
+    writeResourceJsonl(paths.glossary, updateResourceMeta(glossaryMeta.meta ?? defaultResourceTableMeta(project, "glossary")), analysis.glossary),
+    writeResourceJsonl(paths.noTranslate, updateResourceMeta(noTranslateMeta.meta ?? defaultResourceTableMeta(project, "noTranslate")), analysis.noTranslate)
+  ]);
+}
+
+function updateResourceMeta(meta: DictionaryTableMeta): DictionaryTableMeta {
+  return { ...meta, updatedAt: new Date().toISOString() };
 }
 
 export async function appendLog(project: ProjectConfig, message: string): Promise<void> {

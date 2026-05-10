@@ -1,13 +1,16 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { app, BrowserWindow, ipcMain, shell, IpcMainInvokeEvent, Menu } from "electron";
+import { app, BrowserWindow, ipcMain, shell, Menu } from "electron";
 import { getFonts } from "font-list";
 import { downloadAaOnlineGame, validateAaOfflineOutputDirectory } from "./aaofflineService";
-import { aiCommandSystemPrompt, executeAiCommands, extractAiCommands } from "./aiCommandService";
+import { AgentChatHistoryService } from "./agent/agentChatHistoryService";
+import { recordAgentToolResultInTaskPlan, runAgent } from "./agent/agentRuntime";
+import { executeAgentTool } from "./agent/agentTools";
 import { generateAiLocalizationPlanWithIo, loadAiLocalizationPlan } from "./aiLocalizationService";
-import { AiResponseParseError, analyzeWithProviderWithIo, chatCompletion, chatCompletionStream, setAiUsageRecorder, testProvider, translateAnalysisResourcesWithProviderWithIo, translateWithProvider } from "./aiProvider";
+import { AiResponseParseError, analyzeWithProviderWithIo, proofreadWithProviderWithIo, setAiUsageRecorder, testProvider, translateAnalysisResourcesWithProviderWithIo, translateWithProvider } from "./aiProvider";
 import { loadProviderBalance } from "./costService";
+import { createEmptyDictionaryTable, deleteDictionaryTable, exportDictionaryTable, importDictionaryTable, listDictionaryTables, loadDictionaryTable, saveDictionaryTable as saveDictionaryTableFile } from "./dictionaryService";
 import { extractGameTexts } from "./extractors";
 import { exportTextItems, importTextItems } from "./importExport";
 import { analyzeLocally } from "./localAnalysis";
@@ -18,24 +21,82 @@ import { getProjectPreviewStatus, previewProjectGame, stopProjectGamePreview } f
 import { ProjectService } from "./projectService";
 import { defaultProofreadOptions, proofreadItems } from "./proofread";
 import { appendLog, projectDirs, projectPaths, readJsonl, saveAnalysis, writeJson, writeJsonl } from "./storage";
+import { isWebSearchCdpHostProcess, runWebSearchCdpHost } from "./webSearchCdpHost";
 import {
   AaOfflineDownloadInput,
-  AiPermissionMode,
-  ChatMessage,
+  AgentChatHistoryItem,
+  AgentCancelRequest,
+  AgentRunRequest,
+  AgentRunStreamRequest,
+  AgentToolApprovalRequest,
   ItchDownloadInput,
   PackageProjectInput,
+  ProgramAiIoEvent,
+  ProofreadIssue,
   ProofreadOptions,
   PromptConfig,
   PromptScope,
-  ProjectConfig,
   ProviderConfig,
   TextItem
 } from "../shared/types";
 
+if (isWebSearchCdpHostProcess()) {
+  runWebSearchCdpHost(app).catch((error) => {
+    console.error(error);
+    app.quit();
+  });
+} else {
 const projectService = new ProjectService();
-let shellAuthorizationSerial = 0;
+const agentChatHistoryService = new AgentChatHistoryService(projectService);
+const activeAgentRuns = new Map<string, AbortController>();
 
-type AiProgramMessage = { role: string; content: string };
+function optionalProject() {
+  try {
+    return projectService.project;
+  } catch {
+    return undefined;
+  }
+}
+
+function publishProgramAiIo(event: Omit<ProgramAiIoEvent, "id" | "createdAt">): void {
+  const payload: ProgramAiIoEvent = {
+    id: `program_ai_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    createdAt: new Date().toISOString(),
+    ...event
+  };
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.send("ai-program:io", payload);
+  }
+}
+
+async function withProgramAiIo<T>(
+  title: string,
+  task: () => Promise<T & { requestMessages?: Array<{ role: string; content: string }>; responseContent?: string }>
+): Promise<T> {
+  try {
+    const result = await task();
+    if (result.requestMessages?.length || result.responseContent) {
+      publishProgramAiIo({
+        title,
+        requestMessages: result.requestMessages ?? [],
+        responseContent: result.responseContent ?? "",
+        ok: true
+      });
+    }
+    return result;
+  } catch (error) {
+    if (error instanceof AiResponseParseError) {
+      publishProgramAiIo({
+        title,
+        requestMessages: error.requestMessages,
+        responseContent: error.responseContent,
+        ok: false,
+        error: error.message
+      });
+    }
+    throw error;
+  }
+}
 
 setAiUsageRecorder((provider, usage) => {
   if (!usage) return;
@@ -55,6 +116,7 @@ async function createWindow(): Promise<void> {
     title: "BrowserGameTranslator",
     icon,
     webPreferences: {
+      partition: "persist:bgt-main",
       preload: path.join(__dirname, "../preload/preload.js"),
       contextIsolation: true,
       nodeIntegration: false
@@ -117,39 +179,51 @@ ipcMain.handle("providers:setActive", async (_event, activeProviderId: string) =
 ipcMain.handle("providers:setActiveChat", async (_event, activeChatProviderId: string) => projectService.saveActiveChatProviderId(activeChatProviderId));
 ipcMain.handle("providers:test", async (_event, provider: ProviderConfig) => testProvider(provider, await projectService.loadEffectivePrompts()));
 ipcMain.handle("ai-balance:load", async (_event, provider: ProviderConfig) => loadProviderBalance(provider));
+ipcMain.handle("agent:run", async (_event, request: AgentRunRequest) => runAgent(projectService, request));
+ipcMain.handle("agent:runStream", async (event, request: AgentRunStreamRequest) => {
+  const controller = new AbortController();
+  const sender = event.sender;
+  activeAgentRuns.set(request.clientRunId, controller);
+  try {
+    return await runAgent(
+      projectService,
+      request,
+      (agentEvent) => {
+        if (!sender.isDestroyed()) sender.send("agent:event", { clientRunId: request.clientRunId, event: agentEvent });
+      },
+      controller.signal
+    );
+  } finally {
+    activeAgentRuns.delete(request.clientRunId);
+  }
+});
+ipcMain.handle("agent:cancel", async (_event, request: AgentCancelRequest) => {
+  activeAgentRuns.get(request.clientRunId)?.abort();
+});
+ipcMain.handle("agent:executeApprovedTool", async (_event, request: AgentToolApprovalRequest) => {
+  const result = await executeAgentTool(projectService, request.toolName, request.args, { permissionMode: request.permissionMode, approved: true });
+  await recordAgentToolResultInTaskPlan(projectService, request.toolName, result);
+  return result;
+});
+ipcMain.handle("agent:history:load", async () => agentChatHistoryService.load());
+ipcMain.handle("agent:history:append", async (_event, item: AgentChatHistoryItem) => agentChatHistoryService.append(item));
+ipcMain.handle("agent:history:clear", async () => agentChatHistoryService.clear());
 ipcMain.handle("system:fonts", async () => Array.from(new Set(await getFonts({ disableQuoting: true }))).sort((a, b) => a.localeCompare(b)));
 ipcMain.handle("prompts:load", async (_event, scope: PromptScope) => projectService.loadPrompts(scope));
 ipcMain.handle("prompts:save", async (_event, scope: PromptScope, prompts: PromptConfig) => projectService.savePrompts(scope, prompts));
-
-async function appendProgramIo(project: ProjectConfig, title: string, requestMessages: AiProgramMessage[], responseContent: string): Promise<void> {
-  const paths = projectPaths(project);
-  const chat = await readJsonl<ChatMessage>(paths.chat);
-  const createdAt = new Date().toISOString();
-  const serial = Date.now();
-  const promptMessage: ChatMessage = {
-    id: `msg_${serial}_program_prompt`,
-    role: "system",
-    origin: "program",
-    kind: "program_prompt",
-    createdAt,
-    content: [title, ...requestMessages.map((message) => `${message.role === "system" ? "System" : "User"}:\n${message.content}`)].join("\n\n")
-  };
-  const responseMessage: ChatMessage = {
-    id: `msg_${serial}_program_response`,
-    role: "assistant",
-    origin: "program",
-    kind: "program_response",
-    createdAt,
-    content: responseContent
-  };
-  await writeJsonl(paths.chat, [...chat, promptMessage, responseMessage]);
-}
+ipcMain.handle("prompts:defaults", async () => projectService.loadDefaultPrompts());
 
 ipcMain.handle("tools:itch:downloadHtml5", async (event, input: ItchDownloadInput) => {
-  return downloadItchHtml5Game(input, (logEvent) => event.sender.send("tools:itch:log", logEvent));
+  const sender = event.sender;
+  return downloadItchHtml5Game(input, (logEvent) => {
+    if (!sender.isDestroyed()) sender.send("tools:itch:log", logEvent);
+  });
 });
 ipcMain.handle("tools:aaoffline:download", async (event, input: AaOfflineDownloadInput) => {
-  return downloadAaOnlineGame(input, (logEvent) => event.sender.send("tools:aaoffline:log", logEvent));
+  const sender = event.sender;
+  return downloadAaOnlineGame(input, (logEvent) => {
+    if (!sender.isDestroyed()) sender.send("tools:aaoffline:log", logEvent);
+  });
 });
 ipcMain.handle("tools:aaoffline:validateOutput", async (_event, outputPath: string) => validateAaOfflineOutputDirectory(outputPath));
 
@@ -164,8 +238,9 @@ ipcMain.handle("extract:start", async () => {
 
 ipcMain.handle("extract:aiPlan", async (_event, provider: ProviderConfig) => {
   const project = projectService.project;
-  const { plan, requestMessages, responseContent } = await generateAiLocalizationPlanWithIo(project, provider, await projectService.loadEffectivePrompts());
-  await appendProgramIo(project, "AI 生成提取方案", requestMessages, responseContent);
+  const { plan } = await withProgramAiIo("AI 生成提取方案", async () =>
+    generateAiLocalizationPlanWithIo(project, provider, await projectService.loadEffectivePrompts())
+  );
   await appendLog(project, `AI localization plan generated for ${plan.engine}.`);
   return projectService.refresh();
 });
@@ -199,18 +274,9 @@ ipcMain.handle("source:readOriginalFile", async (_event, sourceFile: string) => 
 ipcMain.handle("analysis:start", async (_event, provider: ProviderConfig) => {
   const project = projectService.project;
   const items = await projectService.readTextItems();
-  let output: Awaited<ReturnType<typeof analyzeWithProviderWithIo>>;
-  try {
-    output = await analyzeWithProviderWithIo(provider, items, await projectService.loadEffectivePrompts());
-  } catch (error) {
-    if (error instanceof AiResponseParseError) {
-      await appendProgramIo(project, "AI 分析资源（解析失败）", error.requestMessages, error.responseContent);
-    }
-    throw error;
-  }
-  const { result, requestMessages, responseContent } = output;
+  const output = await withProgramAiIo("AI 分析资源", async () => analyzeWithProviderWithIo(provider, items, await projectService.loadEffectivePrompts()));
+  const { result } = output;
   await saveAnalysis(project, result);
-  await appendProgramIo(project, "AI 分析资源", requestMessages, responseContent);
   await appendLog(project, `Analysis produced ${result.characters.length} characters, ${result.glossary.length} terms, ${result.noTranslate.length} no-translate items.`);
   return result;
 });
@@ -223,11 +289,17 @@ ipcMain.handle("analysis:local", async () => {
   return result;
 });
 ipcMain.handle("analysis:save", async (_event, analysis) => projectService.saveAnalysis(analysis));
+ipcMain.handle("dictionary:list", async () => listDictionaryTables(optionalProject()));
+ipcMain.handle("dictionary:load", async (_event, scope, id, tableType) => loadDictionaryTable(scope, id, tableType, optionalProject()));
+ipcMain.handle("dictionary:save", async (_event, scope, table) => saveDictionaryTableFile(scope, table, optionalProject()));
+ipcMain.handle("dictionary:createEmpty", async (_event, scope, tableType, meta) => createEmptyDictionaryTable(scope, tableType, meta, optionalProject()));
+ipcMain.handle("dictionary:delete", async (_event, scope, id) => deleteDictionaryTable(scope, id, optionalProject()));
+ipcMain.handle("dictionary:export", async (_event, table) => exportDictionaryTable(table));
+ipcMain.handle("dictionary:import", async (_event, scope, conflictMode, pendingTable) => importDictionaryTable(scope, optionalProject(), conflictMode, pendingTable));
 ipcMain.handle("analysis:translateMissing", async (_event, provider: ProviderConfig) => {
   const project = projectService.project;
   const analysis = await projectService.readAnalysis();
-  const { result, translatedCount, requestMessages, responseContent } = await translateAnalysisResourcesWithProviderWithIo(provider, analysis, project.sourceLanguage, project.targetLanguage);
-  if (requestMessages.length) await appendProgramIo(project, "AI 补译资源表", requestMessages, responseContent);
+  const { result, translatedCount } = await withProgramAiIo("AI 翻译资源表", () => translateAnalysisResourcesWithProviderWithIo(provider, analysis, project.sourceLanguage, project.targetLanguage));
   await saveAnalysis(project, result);
   await appendLog(project, `Analysis resource translation filled ${translatedCount} rows.`);
   return result;
@@ -235,25 +307,36 @@ ipcMain.handle("analysis:translateMissing", async (_event, provider: ProviderCon
 ipcMain.handle("analysis:translateRows", async (_event, provider: ProviderConfig, selection: { table: "characters" | "glossary"; ids: string[] }) => {
   const project = projectService.project;
   const analysis = await projectService.readAnalysis();
-  const { result, translatedCount, requestMessages, responseContent } = await translateAnalysisResourcesWithProviderWithIo(provider, analysis, project.sourceLanguage, project.targetLanguage, selection);
-  if (requestMessages.length) await appendProgramIo(project, "AI 翻译资源表选中行", requestMessages, responseContent);
+  const { result, translatedCount } = await withProgramAiIo("AI 翻译资源表选中行", () => translateAnalysisResourcesWithProviderWithIo(provider, analysis, project.sourceLanguage, project.targetLanguage, selection));
   await saveAnalysis(project, result);
   await appendLog(project, `Analysis selected resource translation filled ${translatedCount} rows.`);
   return result;
 });
 
-ipcMain.handle("translation:start", async (_event, provider: ProviderConfig, targetLanguage: string, chat: ChatMessage[]) => {
+ipcMain.handle("translation:start", async (_event, provider: ProviderConfig, targetLanguage: string) => {
   const project = projectService.project;
   const items = await projectService.readTextItems();
   const analysis = await projectService.readAnalysis();
-  const translated = await translateWithProvider(provider, items, project.sourceLanguage, targetLanguage, chat, await projectService.loadEffectivePrompts(), analysis);
+  const translated = await translateWithProvider(provider, items, project.sourceLanguage, targetLanguage, await projectService.loadEffectivePrompts(), analysis, (io) =>
+    publishProgramAiIo({ title: io.title ?? "AI 翻译", requestMessages: io.requestMessages, responseContent: io.responseContent, ok: true })
+  );
   await projectService.saveTextItems(translated);
   await appendLog(project, "Translation task completed.");
   return translated;
 });
-ipcMain.handle("translation:batch", async (_event, provider: ProviderConfig, targetLanguage: string, chat: ChatMessage[], items: TextItem[]) => {
+ipcMain.handle("translation:batch", async (_event, provider: ProviderConfig, targetLanguage: string, items: TextItem[]) => {
   const analysis = await projectService.readAnalysis();
-  return translateWithProvider(provider, items, projectService.project.sourceLanguage, targetLanguage, chat, await projectService.loadEffectivePrompts(), analysis);
+  const titlePrefix = items.length === 1 ? `AI 翻译单行 ${items[0]?.id ?? ""} ` : `AI 翻译选中行（${items.length} 行） `;
+  return translateWithProvider(
+    provider,
+    items,
+    projectService.project.sourceLanguage,
+    targetLanguage,
+    await projectService.loadEffectivePrompts(),
+    analysis,
+    (io) => publishProgramAiIo({ title: io.title ?? "AI 翻译选中行", requestMessages: io.requestMessages, responseContent: io.responseContent, ok: true }),
+    { force: true, titlePrefix }
+  );
 });
 ipcMain.handle("prompts:effective", async () => projectService.loadEffectivePrompts());
 
@@ -263,6 +346,26 @@ ipcMain.handle("proofread:start", async (_event, items: TextItem[], analysis, op
   await writeJsonl(projectPaths(project).issues, issues);
   await appendLog(project, `Proofreading found ${issues.length} issues.`);
   return issues;
+});
+ipcMain.handle("proofread:ai", async (_event, provider: ProviderConfig, issues: ProofreadIssue[]) => {
+  const project = projectService.project;
+  const items = await projectService.readTextItems();
+  const analysis = await projectService.readAnalysis();
+  const { items: proofreadItemsResult, updatedCount } = await withProgramAiIo(
+    "AI 自动校对",
+    async () => proofreadWithProviderWithIo(
+      provider,
+      items,
+      issues,
+      project.sourceLanguage,
+      project.targetLanguage,
+      await projectService.loadEffectivePrompts(),
+      analysis
+    )
+  );
+  await projectService.saveTextItems(proofreadItemsResult);
+  await appendLog(project, `AI proofreading updated ${updatedCount} items.`);
+  return proofreadItemsResult;
 });
 
 ipcMain.handle("patch:preview", async (_event, items: TextItem[]) => previewPatch(projectService.project, items));
@@ -277,164 +380,4 @@ ipcMain.handle("patch:restore", async () => {
   await appendLog(projectService.project, "Working copy restored from original snapshot.");
   return projectService.refresh();
 });
-
-ipcMain.handle("chat:save", async (_event, chat: ChatMessage[]) => {
-  await writeJsonl(projectPaths(projectService.project).chat, chat);
-  return chat;
-});
-ipcMain.handle("chat:reply", async (_event, provider: ProviderConfig, chat: ChatMessage[], permissionMode: AiPermissionMode = "restricted") => {
-  const safePermissionMode: AiPermissionMode = ["restricted", "workspace", "full"].includes(permissionMode) ? permissionMode : "restricted";
-  const baseMessages = buildChatMessages(chat, safePermissionMode);
-  const firstContent = await chatCompletion(provider, baseMessages);
-  const content = await resolveChatContent(_event, provider, baseMessages, firstContent, safePermissionMode);
-  return {
-    id: `msg_${Date.now()}`,
-    role: "assistant",
-    content,
-    createdAt: new Date().toISOString()
-  } satisfies ChatMessage;
-});
-
-ipcMain.handle("chat:replyStream", async (_event, provider: ProviderConfig, chat: ChatMessage[], permissionMode: AiPermissionMode = "restricted", streamId: string) => {
-  const safePermissionMode: AiPermissionMode = ["restricted", "workspace", "full"].includes(permissionMode) ? permissionMode : "restricted";
-  const baseMessages = buildChatMessages(chat, safePermissionMode);
-  const sendDelta = (delta: string) => _event.sender.send("chat:stream:delta", { id: streamId, delta });
-  const firstContent = await chatCompletionStream(provider, baseMessages, sendDelta);
-  const commands = extractAiCommands(firstContent);
-  let content = firstContent;
-  if (commands.length) {
-    _event.sender.send("chat:stream:reset", { id: streamId });
-    const commandResults = await executeAiCommands(projectService, commands, safePermissionMode, (request) => requestShellAuthorization(_event, request));
-    const summary = await chatCompletionStream(
-      provider,
-      [
-        ...baseMessages,
-        { role: "assistant", content: firstContent },
-        {
-          role: "system",
-          content: `BGT command results:\n${JSON.stringify(commandResults, null, 2)}\n\nNow answer the user in natural language. Mention changed records and errors. Do not include bgt-commands blocks.`
-        }
-      ],
-      sendDelta
-    );
-    const cleanedSummary = stripBgtCommandBlocks(summary).trim();
-    content = cleanedSummary && !/```bgt-commands/i.test(cleanedSummary) ? cleanedSummary : formatCommandResults(commandResults);
-    const resultText = formatCommandResults(commandResults);
-    if (!content.includes("命令执行结果")) {
-      const suffix = `\n\n${resultText}`;
-      content = `${content}${suffix}`;
-      sendDelta(suffix);
-    }
-  }
-  return {
-    id: streamId,
-    role: "assistant",
-    content,
-    createdAt: new Date().toISOString()
-  } satisfies ChatMessage;
-});
-
-function buildChatMessages(chat: ChatMessage[], permissionMode: AiPermissionMode): Array<{ role: string; content: string }> {
-  return [
-    {
-      role: "system",
-      content: aiCommandSystemPrompt(projectService.project, permissionMode)
-    },
-    ...chat
-      .filter((message) => message.kind !== "program_prompt" && message.kind !== "program_response")
-      .slice(-20)
-      .map((message) => ({
-        role: message.role === "assistant" ? "assistant" : message.role === "system" ? "system" : "user",
-        content: message.content
-      }))
-  ];
-}
-
-async function resolveChatContent(
-  event: IpcMainInvokeEvent,
-  provider: ProviderConfig,
-  baseMessages: Array<{ role: string; content: string }>,
-  firstContent: string,
-  permissionMode: AiPermissionMode
-): Promise<string> {
-  const commands = extractAiCommands(firstContent);
-  let content = firstContent;
-  if (commands.length) {
-    const commandResults = await executeAiCommands(projectService, commands, permissionMode, (request) => requestShellAuthorization(event, request));
-    const summary = await chatCompletion(provider, [
-        ...baseMessages,
-        { role: "assistant", content: firstContent },
-        {
-          role: "system",
-          content: `BGT command results:\n${JSON.stringify(commandResults, null, 2)}\n\nNow answer the user in natural language. Mention changed records and errors. Do not include bgt-commands blocks.`
-        }
-      ]);
-    const cleanedSummary = stripBgtCommandBlocks(summary).trim();
-    content = cleanedSummary && !/```bgt-commands/i.test(cleanedSummary) ? cleanedSummary : formatCommandResults(commandResults);
-    if (!content.includes("命令执行结果")) {
-      content = `${content}\n\n${formatCommandResults(commandResults)}`;
-    }
-  }
-  return content;
-}
-
-function stripBgtCommandBlocks(content: string): string {
-  return content.replace(/```bgt-commands\s*[\s\S]*?```/gi, "").trim();
-}
-
-function formatCommandResults(results: Array<Record<string, unknown>>): string {
-  const lines = ["命令执行结果："];
-  for (const result of results) {
-    lines.push(`- ${String(result.command ?? "command")}：${result.ok ? "成功" : "失败"}`);
-    if (typeof result.error === "string") lines.push(`  ${result.error}`);
-    if (Array.isArray(result.rows)) {
-      for (const row of result.rows.slice(0, 20)) lines.push(`  ${formatResultRow(row)}`);
-    } else if (isRecord(result.item)) {
-      lines.push(`  ${formatResultRow(result.item)}`);
-    } else if (isRecord(result.row)) {
-      lines.push(`  ${formatResultRow(result.row)}`);
-    }
-    if (typeof result.stdout === "string" && result.stdout.trim()) lines.push(`  stdout: ${result.stdout.trim().slice(0, 1000)}`);
-    if (typeof result.stderr === "string" && result.stderr.trim()) lines.push(`  stderr: ${result.stderr.trim().slice(0, 1000)}`);
-  }
-  return lines.join("\n");
-}
-
-function formatResultRow(row: unknown): string {
-  if (!isRecord(row)) return String(row);
-  const pathValue = typeof row.path === "string" ? row.path : "";
-  const typeValue = typeof row.type === "string" ? ` (${row.type})` : "";
-  if (pathValue) return `${pathValue}${typeValue}`;
-  const idValue = typeof row.id === "string" ? row.id : "";
-  const source = typeof row.source === "string" ? row.source : typeof row.original === "string" ? row.original : "";
-  const target = typeof row.target === "string" ? row.target : typeof row.translation === "string" ? row.translation : "";
-  return [idValue, source, target].filter(Boolean).join(" | ") || JSON.stringify(row).slice(0, 300);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function requestShellAuthorization(
-  event: IpcMainInvokeEvent,
-  request: { command: string; cwd: string; permissionMode: AiPermissionMode }
-): Promise<boolean> {
-  const id = `shell_auth_${Date.now()}_${++shellAuthorizationSerial}`;
-  return new Promise((resolve) => {
-    const cleanup = () => {
-      clearTimeout(timeout);
-      ipcMain.removeListener("shell:authorize:response", onResponse);
-    };
-    const onResponse = (_event: Electron.IpcMainEvent, response: { id?: string; allowed?: boolean }) => {
-      if (response?.id !== id) return;
-      cleanup();
-      resolve(Boolean(response.allowed));
-    };
-    const timeout = setTimeout(() => {
-      cleanup();
-      resolve(false);
-    }, 120_000);
-    ipcMain.on("shell:authorize:response", onResponse);
-    event.sender.send("shell:authorize:request", { id, ...request });
-  });
 }

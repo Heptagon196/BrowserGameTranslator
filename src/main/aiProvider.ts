@@ -1,4 +1,5 @@
-import { AnalysisResult, ChatMessage, PromptConfig, ProviderConfig, TextItem } from "../shared/types";
+import { AnalysisResult, PromptConfig, ProofreadIssue, ProviderConfig, TextItem } from "../shared/types";
+import { extractHtmlTags, extractPlaceholders } from "./textAnalysisUtils";
 
 type ChatUsage = {
   prompt_tokens?: number;
@@ -8,6 +9,31 @@ type ChatUsage = {
 };
 
 type AiMessage = { role: string; content: string };
+export type AiProgramIo = { requestMessages: AiMessage[]; responseContent: string; title?: string };
+type ChatBodyMessage = {
+  role: string;
+  content: string;
+  tool_call_id?: string;
+  tool_calls?: unknown[];
+  reasoning_content?: string;
+};
+export type AiToolDefinition = {
+  name: string;
+  description?: string;
+  parameters?: unknown;
+};
+
+export type AiToolCall = {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+};
+
+export type AiToolCompletion = {
+  content: string;
+  reasoningContent?: string;
+  toolCalls: AiToolCall[];
+};
 
 export class AiResponseParseError extends Error {
   requestMessages: AiMessage[];
@@ -58,7 +84,6 @@ export async function translateAnalysisResourcesWithProviderWithIo(
         source: entry.source,
         familyName: entry.familyName ?? "",
         givenName: entry.givenName ?? "",
-        category: entry.category,
         note: entry.note
       })),
     ...analysis.glossary
@@ -68,7 +93,7 @@ export async function translateAnalysisResourcesWithProviderWithIo(
         id: entry.id,
         source: entry.source,
         category: entry.category,
-        description: entry.description
+        note: entry.note
       }))
   ];
 
@@ -141,14 +166,13 @@ export async function analyzeWithProviderWithIo(provider: ProviderConfig, items:
       role: "user",
       content: JSON.stringify({
         schema: {
-          characters: [{ source: "", target: "", familyName: "", familyNameTranslation: "", givenName: "", givenNameTranslation: "", nicknameOf: "", category: "", note: "", confidence: 0.8, sourceExamples: [] }],
-          glossary: [{ source: "", target: "", description: "", category: "", isRegex: false, sourceExamples: [] }],
-          noTranslate: [{ marker: "", note: "", isRegex: false, sourceExamples: [] }]
+          characters: [{ source: "", target: "", familyName: "", familyNameTranslation: "", givenName: "", givenNameTranslation: "", nicknameOf: "", note: "" }],
+          glossary: [{ source: "", target: "", note: "", category: "", isRegex: false }],
+          noTranslate: [{ marker: "", note: "", isRegex: false }]
         },
         extractionRules: [
           "人物名、称号、地名、组织名、技能名、道具名、UI 固定文案都可以进入术语表。",
-          "变量、控制代码、HTML 标签、占位符、文件路径、URL、格式化符号、脚本片段应进入禁翻表。",
-          "同一 source 只保留一个最可信条目，sourceExamples 最多给 3 条原文例子。"
+          "变量、控制代码、HTML 标签、占位符、文件路径、URL、格式化符号、脚本片段应进入禁翻表。"
         ],
         items: sample
       })
@@ -171,29 +195,24 @@ export async function analyzeWithProviderWithIo(provider: ProviderConfig, items:
       givenName: stringOrUndefined(entry.givenName),
       givenNameTranslation: stringOrUndefined(entry.givenNameTranslation),
       nicknameOf: stringOrUndefined(entry.nicknameOf),
-      category: String(entry.category ?? "unknown"),
       note: String(entry.note ?? ""),
-      confidence: Number(entry.confidence ?? 0.5),
-      enabled: true,
-      sourceExamples: Array.isArray(entry.sourceExamples) ? entry.sourceExamples.map(String) : []
+      enabled: true
     })),
     glossary: uniqueRows(parsed.glossary ?? [], "source").map((entry: Record<string, unknown>, index: number) => ({
       id: `term_${String(index + 1).padStart(4, "0")}`,
       source: String(entry.source ?? ""),
       target: String(entry.target ?? ""),
-      description: String(entry.description ?? entry.note ?? ""),
+      note: String(entry.note ?? ""),
       category: String(entry.category ?? "term"),
       isRegex: Boolean(entry.isRegex),
-      enabled: true,
-      sourceExamples: Array.isArray(entry.sourceExamples) ? entry.sourceExamples.map(String) : []
+      enabled: true
     })),
     noTranslate: uniqueRows(parsed.noTranslate ?? [], "marker").map((entry: Record<string, unknown>, index: number) => ({
       id: `nt_${String(index + 1).padStart(4, "0")}`,
       marker: String(entry.marker ?? ""),
       note: String(entry.note ?? ""),
       isRegex: Boolean(entry.isRegex),
-      enabled: true,
-      sourceExamples: Array.isArray(entry.sourceExamples) ? entry.sourceExamples.map(String) : []
+      enabled: true
     }))
   };
   return { result, requestMessages, responseContent: content };
@@ -204,17 +223,18 @@ export async function translateWithProvider(
   items: TextItem[],
   sourceLanguage: string,
   targetLanguage: string,
-  _promptPatches: ChatMessage[],
   prompts: PromptConfig,
-  analysis?: AnalysisResult
+  analysis?: AnalysisResult,
+  onIo?: (io: AiProgramIo) => void,
+  options?: { force?: boolean; titlePrefix?: string }
 ): Promise<TextItem[]> {
-  const activeItems = items.filter((item) => item.status !== "excluded" && !item.translation);
+  const activeItems = items.filter((item) => item.status !== "excluded" && (options?.force || !item.translation));
   const batches = chunk(activeItems, 20);
   const updated = new Map(items.map((item) => [item.id, item]));
-  for (const batch of batches) {
+  for (const [batchIndex, batch] of batches.entries()) {
     const systemPrompt = buildTranslationSystemPrompt(prompts, sourceLanguage, targetLanguage, batch, analysis);
     const userPrompt = buildTranslationUserPrompt(batch);
-    const content = await chatCompletion(provider, [
+    const requestMessages = [
       {
         role: "system",
         content: systemPrompt
@@ -223,7 +243,9 @@ export async function translateWithProvider(
         role: "user",
         content: userPrompt
       }
-    ]);
+    ];
+    const content = await chatCompletion(provider, requestMessages);
+    onIo?.({ title: `${options?.titlePrefix ?? "AI 翻译"}批次 ${batchIndex + 1}/${batches.length}`, requestMessages, responseContent: content });
     const rows = parseTranslatedRows(content, batch);
     for (const row of rows) {
       const item = updated.get(row.id);
@@ -238,6 +260,127 @@ export async function translateWithProvider(
     }
   }
   return Array.from(updated.values());
+}
+
+type ProofreadJob = {
+  id: string;
+  original: string;
+  translation: string;
+  issues: Array<{ rule: string; message: string; severity: string }>;
+};
+
+export async function proofreadWithProviderWithIo(
+  provider: ProviderConfig,
+  items: TextItem[],
+  issues: ProofreadIssue[],
+  sourceLanguage: string,
+  targetLanguage: string,
+  prompts: PromptConfig,
+  analysis?: AnalysisResult
+): Promise<{ items: TextItem[]; updatedCount: number; requestMessages: Array<{ role: string; content: string }>; responseContent: string }> {
+  const jobs = buildProofreadJobs(items, issues);
+  if (!jobs.length) return { items, updatedCount: 0, requestMessages: [], responseContent: "" };
+  const updated = new Map(items.map((item) => [item.id, item]));
+  const requestMessages: Array<{ role: string; content: string }> = [];
+  const responseParts: string[] = [];
+  let updatedCount = 0;
+
+  for (const batch of chunk(jobs, 20)) {
+    const currentBatch = batch.map((job) => {
+      const current = updated.get(job.id);
+      return current ? { ...job, translation: current.translation } : job;
+    });
+    const messages = [
+      { role: "system", content: renderProofreadSystemPrompt(prompts.proofreadSystem, sourceLanguage, targetLanguage) },
+      { role: "user", content: buildProofreadUserPrompt(currentBatch, targetLanguage) }
+    ];
+    const content = await chatCompletion(provider, messages);
+    requestMessages.push(...messages);
+    responseParts.push(content);
+    const rows = parseProofreadRows(content);
+    for (const row of rows) {
+      const item = updated.get(row.id);
+      if (!item) continue;
+      const translation = row.translation.trim();
+      if (!translation) continue;
+      const validationIssues = validateTranslation(item, translation, analysis);
+      updated.set(row.id, {
+        ...item,
+        translation,
+        status: validationIssues.length ? "needs_review" : "translated"
+      });
+      updatedCount += 1;
+    }
+  }
+
+  return { items: Array.from(updated.values()), updatedCount, requestMessages, responseContent: responseParts.join("\n\n---\n\n") };
+}
+
+function buildProofreadJobs(items: TextItem[], issues: ProofreadIssue[]): ProofreadJob[] {
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const jobs = new Map<string, ProofreadJob>();
+  for (const issue of issues) {
+    const item = byId.get(issue.textItemId);
+    if (!item || item.status === "excluded") continue;
+    const job = jobs.get(item.id) ?? {
+      id: item.id,
+      original: item.original,
+      translation: item.translation,
+      issues: []
+    };
+    job.issues.push({ rule: issue.rule, message: issue.message, severity: issue.severity });
+    jobs.set(item.id, job);
+  }
+  return Array.from(jobs.values());
+}
+
+function renderProofreadSystemPrompt(template: string, sourceLanguage: string, targetLanguage: string): string {
+  return template.replaceAll("{source_language}", sourceLanguage).replaceAll("{target_language}", targetLanguage);
+}
+
+function buildProofreadUserPrompt(jobs: ProofreadJob[], targetLanguage: string): string {
+  return [
+    `目标语言：${targetLanguage}`,
+    "请校对以下条目，只返回 JSON 数组。",
+    JSON.stringify(
+      jobs.map((job) => ({
+        id: job.id,
+        issues: job.issues,
+        original: job.original,
+        currentTranslation: job.translation || "[空]"
+      })),
+      null,
+      2
+    )
+  ].join("\n\n");
+}
+
+function parseProofreadRows(content: string): Array<{ id: string; translation: string }> {
+  const json = extractJsonArray(content);
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((row) => {
+        if (!row || typeof row !== "object") return null;
+        const value = row as Record<string, unknown>;
+        const id = String(value.id ?? "").trim();
+        const translation = String(value.translation ?? "").trim();
+        return id && translation ? { id, translation } : null;
+      })
+      .filter((row): row is { id: string; translation: string } => Boolean(row));
+  } catch {
+    return [];
+  }
+}
+
+function extractJsonArray(content: string): string | null {
+  const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const source = fenced?.[1] ?? content;
+  const start = source.indexOf("[");
+  const end = source.lastIndexOf("]");
+  return start >= 0 && end > start ? source.slice(start, end + 1) : null;
 }
 
 export async function chatCompletion(provider: ProviderConfig, messages: Array<{ role: string; content: string }>): Promise<string> {
@@ -259,6 +402,167 @@ export async function chatCompletion(provider: ProviderConfig, messages: Array<{
   const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }>; usage?: ChatUsage };
   if (data.usage) usageRecorder?.(provider, data.usage);
   return data.choices?.[0]?.message?.content ?? "";
+}
+
+export async function chatCompletionWithTools(
+  provider: ProviderConfig,
+  messages: ChatBodyMessage[],
+  tools: AiToolDefinition[]
+): Promise<AiToolCompletion> {
+  if (!provider.apiKey.trim()) throw new Error("API Key is required.");
+  const baseUrl = provider.baseUrl.replace(/\/$/, "");
+  const body = createChatBody(provider, messages);
+  body.tools = tools.map((tool) => ({
+    type: "function",
+    function: {
+      name: tool.name,
+      description: tool.description ?? "",
+      parameters: tool.parameters ?? { type: "object", properties: {} }
+    }
+  }));
+  body.tool_choice = "auto";
+  const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${provider.apiKey}`
+    },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) {
+    const bodyText = await response.text();
+    throw new Error(`AI request failed: ${response.status} ${bodyText.slice(0, 500)}`);
+  }
+  const data = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string | null; reasoning_content?: string; tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }> } }>;
+    usage?: ChatUsage;
+  };
+  if (data.usage) usageRecorder?.(provider, data.usage);
+  const message = data.choices?.[0]?.message;
+  return {
+    content: message?.content ?? "",
+    reasoningContent: message?.reasoning_content,
+    toolCalls: (message?.tool_calls ?? [])
+      .map((call, index) => ({
+        id: call.id || `tool_${Date.now()}_${index}`,
+        name: call.function?.name ?? "",
+        arguments: parseToolArguments(call.function?.arguments ?? "{}")
+      }))
+      .filter((call) => call.name)
+  };
+}
+
+export async function chatCompletionWithToolsStream(
+  provider: ProviderConfig,
+  messages: ChatBodyMessage[],
+  tools: AiToolDefinition[],
+  onContentDelta: (delta: string) => void,
+  signal?: AbortSignal
+): Promise<AiToolCompletion> {
+  if (!provider.apiKey.trim()) throw new Error("API Key is required.");
+  throwIfAborted(signal);
+  const baseUrl = provider.baseUrl.replace(/\/$/, "");
+  const body = createChatBody(provider, messages, true);
+  body.tools = tools.map((tool) => ({
+    type: "function",
+    function: {
+      name: tool.name,
+      description: tool.description ?? "",
+      parameters: tool.parameters ?? { type: "object", properties: {} }
+    }
+  }));
+  body.tool_choice = "auto";
+  const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${provider.apiKey}`
+    },
+    body: JSON.stringify(body),
+    signal
+  });
+  if (!response.ok) {
+    const bodyText = await response.text();
+    throw new Error(`AI request failed: ${response.status} ${bodyText.slice(0, 500)}`);
+  }
+  if (!response.body) return { content: "", toolCalls: [] };
+
+  const reader = response.body.getReader();
+  const cancelReader = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+  signal?.addEventListener("abort", cancelReader, { once: true });
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let content = "";
+  let reasoningContent = "";
+  const toolCallParts = new Map<number, { id: string; name: string; argumentsText: string }>();
+  let currentToolCallIndex = 0;
+
+  try {
+    while (true) {
+      throwIfAborted(signal);
+      const { value, done } = await reader.read();
+      throwIfAborted(signal);
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        throwIfAborted(signal);
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const payload = trimmed.slice(5).trim();
+        if (!payload || payload === "[DONE]") continue;
+        const parsed = JSON.parse(payload) as {
+          choices?: Array<{
+            delta?: {
+              content?: string | null;
+              reasoning_content?: string;
+              tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }>;
+            };
+            message?: { content?: string | null };
+          }>;
+          usage?: ChatUsage;
+        };
+        if (parsed.usage) usageRecorder?.(provider, parsed.usage);
+        const delta = parsed.choices?.[0]?.delta;
+        const contentDelta = delta?.content ?? parsed.choices?.[0]?.message?.content ?? "";
+        if (contentDelta) {
+          content += contentDelta;
+          onContentDelta(contentDelta);
+        }
+        if (delta?.reasoning_content) {
+          reasoningContent += delta.reasoning_content;
+        }
+        for (const toolDelta of delta?.tool_calls ?? []) {
+          const index = typeof toolDelta.index === "number" ? toolDelta.index : currentToolCallIndex;
+          currentToolCallIndex = index;
+          const current = toolCallParts.get(index) ?? { id: "", name: "", argumentsText: "" };
+          toolCallParts.set(index, {
+            id: toolDelta.id ?? current.id,
+            name: toolDelta.function?.name ?? current.name,
+            argumentsText: current.argumentsText + (toolDelta.function?.arguments ?? "")
+          });
+        }
+      }
+    }
+  } finally {
+    signal?.removeEventListener("abort", cancelReader);
+    reader.releaseLock();
+  }
+
+  return {
+    content,
+    reasoningContent: reasoningContent || undefined,
+    toolCalls: Array.from(toolCallParts.values())
+      .map((call, index) => ({
+        id: call.id || `tool_${Date.now()}_${index}`,
+        name: call.name,
+        arguments: parseToolArguments(call.argumentsText || "{}")
+      }))
+      .filter((call) => call.name)
+  };
 }
 
 export async function chatCompletionStream(
@@ -309,13 +613,13 @@ export async function chatCompletionStream(
   return output;
 }
 
-function createChatBody(provider: ProviderConfig, messages: Array<{ role: string; content: string }>, stream = false): Record<string, unknown> {
+function createChatBody(provider: ProviderConfig, messages: ChatBodyMessage[], stream = false): Record<string, unknown> {
   const modelSettings = provider.modelSettings?.[provider.model] ?? {};
   const body: Record<string, unknown> = {
     model: provider.model,
     temperature: modelSettings.temperature ?? provider.temperature,
     max_tokens: modelSettings.maxOutputTokens ?? provider.maxOutputTokens,
-    messages
+    messages: normalizeChatMessages(provider, messages)
   };
   if (stream) {
     body.stream = true;
@@ -332,6 +636,40 @@ function createChatBody(provider: ProviderConfig, messages: Array<{ role: string
   return body;
 }
 
+function normalizeChatMessages(provider: ProviderConfig, messages: ChatBodyMessage[]): ChatBodyMessage[] {
+  return messages.map((message) => {
+    const normalized: ChatBodyMessage = {
+      role: message.role,
+      content: message.content
+    };
+    if (message.tool_call_id) {
+      normalized.tool_call_id = message.tool_call_id;
+    }
+    if (message.tool_calls) {
+      normalized.tool_calls = message.tool_calls;
+    }
+    if (provider.type === "deepseek" && message.reasoning_content) {
+      normalized.reasoning_content = message.reasoning_content;
+    }
+    return normalized;
+  });
+}
+
+function parseToolArguments(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value || "{}") as unknown;
+    if (Array.isArray(parsed)) return { updates: parsed };
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw new Error("AGENT_RUN_CANCELLED");
+}
+
 function supportsOpenAiReasoning(model: string): boolean {
   return /^(gpt-5|o\d|o[1-9]|o[1-9]-|o[1-9a-z.-]*|gpt-oss)/i.test(model);
 }
@@ -342,7 +680,7 @@ function normalizeOpenAiReasoningEffort(value: ProviderConfig["reasoningEffort"]
   return "medium";
 }
 
-function parseJsonObject(content: string): Record<string, any> {
+export function parseJsonObject(content: string): Record<string, any> {
   const cleaned = stripCodeFence(content);
   return parseJsonWithRepair(cleaned.slice(cleaned.indexOf("{"), cleaned.lastIndexOf("}") + 1)) as Record<string, any>;
 }
@@ -398,7 +736,7 @@ function parseLooseNamedArray(content: string, key: string): Array<Record<string
   if (!body) return [];
   const rows: Array<Record<string, unknown>> = [];
   for (const objectText of extractObjectTexts(body)) {
-    const normalized = objectText.replace(/"sourceExamples"\s*:\s*\[[\s\S]*?\]/g, "\"sourceExamples\":[]");
+    const normalized = objectText;
     try {
       const parsed = parseJsonWithRepair(normalized);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) rows.push(parsed as Record<string, unknown>);
@@ -568,7 +906,7 @@ function buildResourceSections(batch: TextItem[], analysis?: AnalysisResult): st
       [
         "###角色表",
         "原文|译文|备注",
-        ...characters.slice(0, 80).map((entry) => `${entry.source}|${entry.target || "待定"}|${entry.note || entry.category}`)
+        ...characters.slice(0, 80).map((entry) => `${entry.source}|${entry.target || "待定"}|${entry.note}`)
       ].join("\n")
     );
   }
@@ -578,7 +916,7 @@ function buildResourceSections(batch: TextItem[], analysis?: AnalysisResult): st
       [
         "###术语表",
         "原文|译文|备注",
-        ...terms.slice(0, 120).map((entry) => `${entry.source}|${entry.target || "待定"}|${entry.description || entry.category}`)
+        ...terms.slice(0, 120).map((entry) => `${entry.source}|${entry.target || "待定"}|${entry.note || entry.category}`)
       ].join("\n")
     );
   }
@@ -659,7 +997,7 @@ function validateTranslation(item: TextItem, translation: string, analysis?: Ana
   const issues: string[] = [];
   if (!translation) issues.push("empty");
   if (newlineCount(item.original) !== newlineCount(translation)) issues.push("newline");
-  for (const token of [...item.metadata.placeholders, ...item.metadata.tags]) {
+  for (const token of [...extractPlaceholders(item.original), ...extractHtmlTags(item.original)]) {
     if (token && !translation.includes(token)) issues.push(`missing:${token}`);
   }
   if (/\d+\.\d+\./.test(translation)) issues.push("numbering_residue");
