@@ -38,16 +38,68 @@ function scopeRoot(scope: DictionaryScope, project?: ProjectConfig): string {
 }
 
 function tableFileName(id: string): string {
-  return `${id.replace(/[^A-Za-z0-9_.-]/g, "_")}.jsonl`;
+  return `${safeTableFileBase(id)}.jsonl`;
 }
 
 function tablePath(scope: DictionaryScope, id: string, project?: ProjectConfig): string {
   return path.join(scopeRoot(scope, project), tableFileName(id));
 }
 
+function tableFilePath(scope: DictionaryScope, fileName: string, project?: ProjectConfig): string {
+  const safeName = path.basename(fileName);
+  if (!safeName.endsWith(".jsonl")) throw new Error("Invalid dictionary table file.");
+  return path.join(scopeRoot(scope, project), safeName);
+}
+
+async function allocateTablePath(scope: DictionaryScope, id: string, project?: ProjectConfig): Promise<string> {
+  const root = scopeRoot(scope, project);
+  await fs.mkdir(root, { recursive: true });
+  const base = safeTableFileBase(id);
+  for (let index = 0; index < 1000; index += 1) {
+    const suffix = index === 0 ? "" : `_${index + 1}`;
+    const candidate = path.join(root, `${base}${suffix}.jsonl`);
+    try {
+      await fs.access(candidate);
+    } catch {
+      return candidate;
+    }
+  }
+  return path.join(root, `${base}_${Date.now()}.jsonl`);
+}
+
+function userIdSuffix(id: string): string {
+  return normalizeIdSuffix(id) || `table_${Date.now()}`;
+}
+
+function normalizeIdSuffix(id: string): string {
+  return id
+    .trim()
+    .replace(/^user\./, "")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim();
+}
+
+function safeTableFileBase(id: string): string {
+  const sanitized =
+    userIdSuffix(id)
+      .normalize("NFKC")
+      .replace(/[\u0000-\u001f\u007f]/g, "_")
+      .replace(/[\\/:"*?<>|#%{}[\]^`]/g, "_")
+      .replace(/\s+/g, "_")
+      .replace(/^\.+/, "")
+      .replace(/[. ]+$/g, "")
+      .slice(0, 120) || `table_${Date.now()}`;
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(sanitized)) return `${sanitized}_table`;
+  return sanitized;
+}
+
 function ensureUserId(id: string): string {
-  const body = id.trim().replace(/^user\./, "").replace(/[^A-Za-z0-9_.-]/g, "_") || `table_${Date.now()}`;
-  return `user.${body}`;
+  return `user.${userIdSuffix(id)}`;
+}
+
+function storageMeta(meta: DictionaryTableMeta): DictionaryTableMeta {
+  if (meta.id.startsWith("project.")) return meta;
+  return { ...meta, id: userIdSuffix(meta.id) };
 }
 
 function normalizeMeta(input: Partial<DictionaryTableMeta>, tableType: ResourceTableType): DictionaryTableMeta {
@@ -60,8 +112,12 @@ function normalizeMeta(input: Partial<DictionaryTableMeta>, tableType: ResourceT
     tableType,
     displayName: input.displayName?.trim() || id,
     description: input.description?.trim() || "",
+    gameName: input.gameName?.trim() || "",
+    sourceLanguage: input.sourceLanguage?.trim() || "en",
+    targetLanguage: input.targetLanguage?.trim() || "zh-CN",
     createdAt: input.createdAt || now,
-    updatedAt: now
+    updatedAt: now,
+    remote: input.remote
   };
 }
 
@@ -71,8 +127,12 @@ function normalizeProjectDefaultMeta(input: Partial<DictionaryTableMeta>, projec
     ...fallback,
     displayName: input.displayName?.trim() || fallback.displayName,
     description: input.description?.trim() || "",
+    gameName: input.gameName?.trim() || fallback.gameName,
+    sourceLanguage: project.sourceLanguage,
+    targetLanguage: project.targetLanguage,
     createdAt: input.createdAt || fallback.createdAt,
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
+    remote: input.remote
   };
 }
 
@@ -95,7 +155,9 @@ async function readDictionaryFile(filePath: string): Promise<DictionaryTable> {
     .filter(Boolean)
     .map((line) => JSON.parse(line) as unknown);
   const first = values[0];
-  const meta = isMeta(first) ? first : normalizeMeta({ id: path.basename(filePath, ".jsonl"), displayName: path.basename(filePath, ".jsonl") }, inferTypeFromRows(values));
+  const meta = isMeta(first)
+    ? normalizeMeta(first, first.tableType)
+    : normalizeMeta({ id: path.basename(filePath, ".jsonl"), displayName: path.basename(filePath, ".jsonl") }, inferTypeFromRows(values));
   const rows = (isMeta(first) ? values.slice(1) : values) as DictionaryTableRows;
   return { meta, rows };
 }
@@ -112,9 +174,14 @@ async function listScope(scope: DictionaryScope, project?: ProjectConfig): Promi
       summaries.push({
         scope,
         id: table.meta.id,
+        fileName: file,
         tableType: table.meta.tableType,
         displayName: table.meta.displayName,
         description: table.meta.description,
+        gameName: table.meta.gameName,
+        sourceLanguage: table.meta.sourceLanguage,
+        targetLanguage: table.meta.targetLanguage,
+        updateUrl: table.meta.remote?.url,
         rowCount: table.rows.length,
         deletable: true
       });
@@ -152,11 +219,15 @@ function summaryFromProject(project: ProjectConfig, tableType: ResourceTableType
     tableType,
     displayName: meta.displayName,
     description: meta.description,
+    gameName: meta.gameName,
+    sourceLanguage: meta.sourceLanguage,
+    targetLanguage: meta.targetLanguage,
+    updateUrl: meta.remote?.url,
     rowCount
   };
 }
 
-export async function loadDictionaryTable(scope: DictionaryScope | "projectDefault", id: string, tableType: ResourceTableType, project?: ProjectConfig): Promise<DictionaryTable> {
+export async function loadDictionaryTable(scope: DictionaryScope | "projectDefault", id: string, tableType: ResourceTableType, project?: ProjectConfig, fileName?: string): Promise<DictionaryTable> {
   if (scope === "projectDefault") {
     if (!project) throw new Error("No project is open.");
     const paths = projectPaths(project);
@@ -171,10 +242,10 @@ export async function loadDictionaryTable(scope: DictionaryScope | "projectDefau
     const table = await readResourceJsonl<NoTranslateEntry>(paths.noTranslate);
     return { meta: table.meta ?? defaultResourceTableMeta(project, tableType), rows: table.rows };
   }
-  return readDictionaryFile(tablePath(scope, id, project));
+  return readDictionaryFile(fileName ? tableFilePath(scope, fileName, project) : tablePath(scope, id, project));
 }
 
-export async function saveDictionaryTable(scope: DictionaryScope | "projectDefault", table: DictionaryTable, project?: ProjectConfig): Promise<DictionaryTable> {
+export async function saveDictionaryTable(scope: DictionaryScope | "projectDefault", table: DictionaryTable, project?: ProjectConfig, fileName?: string): Promise<DictionaryTable> {
   if (scope === "projectDefault") {
     if (!project) throw new Error("No project is open.");
     const meta = normalizeProjectDefaultMeta(table.meta, project, table.meta.tableType);
@@ -184,7 +255,8 @@ export async function saveDictionaryTable(scope: DictionaryScope | "projectDefau
     return { meta, rows: table.rows };
   }
   const meta = normalizeMeta(table.meta, table.meta.tableType);
-  await writeResourceJsonl(tablePath(scope, meta.id, project), meta, table.rows as ResourceRow[]);
+  const filePath = fileName ? tableFilePath(scope, fileName, project) : await allocateTablePath(scope, meta.id, project);
+  await writeResourceJsonl(filePath, storageMeta(meta), table.rows as ResourceRow[]);
   return { meta, rows: table.rows };
 }
 
@@ -192,18 +264,18 @@ export async function createEmptyDictionaryTable(scope: DictionaryScope, tableTy
   return saveDictionaryTable(scope, { meta: normalizeMeta(input, tableType), rows: [] }, project);
 }
 
-export async function deleteDictionaryTable(scope: DictionaryScope, id: string, project?: ProjectConfig): Promise<void> {
-  await fs.unlink(tablePath(scope, id, project));
+export async function deleteDictionaryTable(scope: DictionaryScope, id: string, project?: ProjectConfig, fileName?: string): Promise<void> {
+  await fs.unlink(fileName ? tableFilePath(scope, fileName, project) : tablePath(scope, id, project));
 }
 
 export async function exportDictionaryTable(table: DictionaryTable): Promise<string | null> {
   const result = await dialog.showSaveDialog({
     title: "导出词典表",
-    defaultPath: `${table.meta.id}.jsonl`,
+    defaultPath: `${userIdSuffix(table.meta.id)}.jsonl`,
     filters: [{ name: "JSONL", extensions: ["jsonl"] }]
   });
   if (result.canceled || !result.filePath) return null;
-  await writeResourceJsonl(result.filePath, table.meta, table.rows as ResourceRow[]);
+  await writeResourceJsonl(result.filePath, storageMeta(normalizeMeta(table.meta, table.meta.tableType)), table.rows as ResourceRow[]);
   return result.filePath;
 }
 
@@ -221,9 +293,7 @@ export async function importDictionaryTable(scope: DictionaryScope, project?: Pr
   const normalized = { ...table, meta: normalizeMeta(table.meta, table.meta.tableType) };
   const existing = (await listDictionaryTables(project)).find((item) => item.scope === scope && item.id === normalized.meta.id);
   if (existing && !conflictMode) return { status: "conflict", table: normalized, existing };
-  const tableToSave = conflictMode === "newId"
-    ? { ...normalized, meta: normalizeMeta({ ...normalized.meta, id: `${normalized.meta.id}_${Date.now()}` }, normalized.meta.tableType) }
-    : normalized;
-  const saved = await saveDictionaryTable(scope, tableToSave, project);
+  if (existing && conflictMode === "newId") return { status: "conflict", table: normalized, existing };
+  const saved = await saveDictionaryTable(scope, normalized, project);
   return { status: "imported", table: saved };
 }

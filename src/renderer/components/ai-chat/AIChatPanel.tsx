@@ -11,6 +11,7 @@ import { ChevronDown, ChevronRight, Maximize2, MessageSquare, Minimize2, PanelRi
 import type { AiBalanceSnapshot, AiPermissionMode, AnalysisResult, ProgramAiIoEvent, ProviderConfig, TextItem } from "../../../shared/types";
 import { CommandSelect } from "../ui/Selectors";
 import { AppDialog, AppTooltip, StyledSelect, ToggleSwitch } from "../ui/Primitives";
+import { ExternalMarkdownLink } from "../../markdownLinks";
 
 type AgentContext = {
   currentView?: string;
@@ -463,14 +464,7 @@ function MarkdownTextPart() {
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          a: ({ children, href }) =>
-            href && /^https?:\/\//i.test(href) ? (
-              <a href={href} rel="noreferrer" target="_blank">
-                {children}
-              </a>
-            ) : (
-              <span>{children}</span>
-            )
+          a: ExternalMarkdownLink
         }}
       >
         {part.text}

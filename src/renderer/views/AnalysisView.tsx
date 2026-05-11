@@ -3,8 +3,9 @@ import { Bot, FileDown, FileSearch, Info, Languages, Save, Trash2, Upload } from
 import type { AnalysisResult, AppStateSnapshot, DictionaryTable, DictionaryTableMeta, DictionaryTableSummary, ProviderConfig, ResourceTableType } from "../../shared/types";
 import { EditableResourceSections, type ResourceTableId, type TableSettings } from "../components/table/DataTable";
 import { CommandSelect } from "../components/ui/Selectors";
-import { AppDialog } from "../components/ui/Primitives";
-import { tableTypeLabel } from "./DictionaryView";
+import { AppDialog, StyledSelect } from "../components/ui/Primitives";
+import { languageSelectOptions } from "../settingsModel";
+import { normalizeUserId, suggestConflictId, tableTypeLabel, UserIdInput } from "./DictionaryView";
 
 export default function AnalysisView({
   busy,
@@ -34,24 +35,36 @@ export default function AnalysisView({
   });
   const [externalTable, setExternalTable] = useState<DictionaryTable | null>(null);
   const [infoOpen, setInfoOpen] = useState(false);
-  const [infoDraft, setInfoDraft] = useState({ id: "", displayName: "", description: "" });
+  const [infoDraft, setInfoDraft] = useState({ id: "", displayName: "", gameName: "", sourceLanguage: "", targetLanguage: "", description: "" });
   const [saveToDictionaryOpen, setSaveToDictionaryOpen] = useState(false);
-  const [saveToDictionaryDraft, setSaveToDictionaryDraft] = useState({ id: "", displayName: "", description: "" });
+  const [saveToDictionaryDraft, setSaveToDictionaryDraft] = useState({ id: "", displayName: "", gameName: "", sourceLanguage: "", targetLanguage: "", description: "" });
   const [exportOpen, setExportOpen] = useState(false);
-  const [exportDraft, setExportDraft] = useState({ id: "", displayName: "", description: "" });
+  const [exportDraft, setExportDraft] = useState({ id: "", displayName: "", gameName: "", sourceLanguage: "", targetLanguage: "", description: "" });
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [importConflict, setImportConflict] = useState<{ table: DictionaryTable; existing?: DictionaryTableSummary } | null>(null);
+  const [importConflictDraftId, setImportConflictDraftId] = useState("");
 
   const activeSelection = selectedTables[activeTable];
   const activeSummary = tableSummaries.find((item) => tableKey(item) === activeSelection);
+  const importConflictDraftNormalizedId = normalizeUserId(importConflictDraftId);
+  const importConflictDraftExists = Boolean(importConflict && tableSummaries.some((item) => item.scope === "project" && item.id === importConflictDraftNormalizedId));
   const isProjectDefault = !activeSummary || activeSummary.scope === "projectDefault";
   const displayedAnalysis = useMemo(() => {
     if (!externalTable || isProjectDefault) return snapshot.analysis;
     return withRows(snapshot.analysis, activeTable, externalTable.rows);
   }, [snapshot.analysis, externalTable, isProjectDefault, activeTable]);
+  const resourceRowCounts = useMemo(
+    () => ({
+      characters: totalRowCountForTableType("characters", activeTable, selectedTables, tableSummaries, snapshot.analysis, externalTable),
+      glossary: totalRowCountForTableType("glossary", activeTable, selectedTables, tableSummaries, snapshot.analysis, externalTable),
+      noTranslate: totalRowCountForTableType("noTranslate", activeTable, selectedTables, tableSummaries, snapshot.analysis, externalTable)
+    }),
+    [activeTable, selectedTables, tableSummaries, snapshot.analysis, externalTable]
+  );
 
   const reloadTables = async () => {
     const next = await window.bgt.listDictionaryTables();
-    setTableSummaries(next);
+    setTableSummaries(next.filter(isProjectResourceSummary));
   };
 
   useEffect(() => {
@@ -63,7 +76,7 @@ export default function AnalysisView({
       setExternalTable(null);
       return;
     }
-    void run("读取资源表", () => window.bgt.loadDictionaryTable(activeSummary.scope, activeSummary.id, activeSummary.tableType), setExternalTable);
+    void run("读取资源表", () => window.bgt.loadDictionaryTable(activeSummary.scope, activeSummary.id, activeSummary.tableType, activeSummary.fileName), setExternalTable);
   }, [activeSelection, activeSummary?.id, activeSummary?.scope, activeSummary?.tableType]);
 
   const saveAnalysis = (analysis: AnalysisResult) => {
@@ -75,7 +88,7 @@ export default function AnalysisView({
     if (!activeSummary || activeSummary.scope === "projectDefault" || !externalTable) return saveAnalysis(analysis);
     const rows = rowsFor(analysis, activeTable);
     setExternalTable({ ...externalTable, rows });
-    return run("保存词典表", () => window.bgt.saveDictionaryTable(activeSummary.scope, { ...externalTable, rows }), setExternalTable);
+    return run("保存词典表", () => window.bgt.saveDictionaryTable(activeSummary.scope, { ...externalTable, rows }, activeSummary.fileName), setExternalTable);
   };
 
   const openSaveToDictionaryDialog = () => {
@@ -83,6 +96,9 @@ export default function AnalysisView({
     setSaveToDictionaryDraft({
       id: fallbackId,
       displayName: activeSummary?.displayName ?? tableTypeLabel(activeTable),
+      gameName: activeSummary?.gameName ?? snapshot.project?.projectName ?? "",
+      sourceLanguage: activeSummary?.sourceLanguage ?? snapshot.project?.sourceLanguage ?? "en",
+      targetLanguage: activeSummary?.targetLanguage ?? snapshot.project?.targetLanguage ?? "zh-CN",
       description: activeSummary?.description ?? ""
     });
     setSaveToDictionaryOpen(true);
@@ -99,14 +115,15 @@ export default function AnalysisView({
       tableType: activeTable,
       displayName,
       description: saveToDictionaryDraft.description.trim(),
+      gameName: saveToDictionaryDraft.gameName.trim(),
+      sourceLanguage: saveToDictionaryDraft.sourceLanguage,
+      targetLanguage: saveToDictionaryDraft.targetLanguage,
       createdAt: now,
       updatedAt: now
     };
     const table: DictionaryTable = { meta, rows: rowsFor(displayedAnalysis, activeTable) };
     await run("保存表至词典", () => window.bgt.saveDictionaryTable("global", table), async (saved) => {
-      setExternalTable(saved);
       await reloadTables();
-      setSelectedTables((state) => ({ ...state, [activeTable]: `global:${saved.meta.id}` }));
       setSaveToDictionaryOpen(false);
     });
   };
@@ -116,6 +133,9 @@ export default function AnalysisView({
     setExportDraft({
       id: fallbackId,
       displayName: activeSummary?.displayName ?? tableTypeLabel(activeTable),
+      gameName: activeSummary?.gameName ?? snapshot.project?.projectName ?? "",
+      sourceLanguage: activeSummary?.sourceLanguage ?? snapshot.project?.sourceLanguage ?? "en",
+      targetLanguage: activeSummary?.targetLanguage ?? snapshot.project?.targetLanguage ?? "zh-CN",
       description: activeSummary?.description ?? ""
     });
     setExportOpen(true);
@@ -132,6 +152,9 @@ export default function AnalysisView({
       tableType: activeTable,
       displayName,
       description: exportDraft.description.trim(),
+      gameName: exportDraft.gameName.trim(),
+      sourceLanguage: exportDraft.sourceLanguage,
+      targetLanguage: exportDraft.targetLanguage,
       createdAt: now,
       updatedAt: now
     };
@@ -144,18 +167,33 @@ export default function AnalysisView({
     const result = await run("导入资源表", () => window.bgt.importDictionaryTable("project"));
     if (!result || result.status === "cancelled") return;
     if (result.status === "conflict" && result.table) {
-      const overwrite = window.confirm(`已存在同 ID 的表：${result.existing?.displayName ?? result.table.meta.id}\n确定覆盖？取消则新建 ID。`);
-      const resolved = await run("处理导入表冲突", () => window.bgt.importDictionaryTable("project", overwrite ? "overwrite" : "newId", result.table));
-      if (resolved?.table) setSelectedTables((state) => ({ ...state, [resolved.table!.meta.tableType]: `project:${resolved.table!.meta.id}` }));
+      setImportConflict({ table: result.table, existing: result.existing });
+      setImportConflictDraftId(suggestConflictId(result.table.meta.id));
     } else if (result.table) {
       setSelectedTables((state) => ({ ...state, [result.table!.meta.tableType]: `project:${result.table!.meta.id}` }));
     }
     await reloadTables();
   };
 
+  const resolveImportConflict = async (conflictMode: "overwrite" | "newId") => {
+    if (!importConflict) return;
+    const tableToImport = conflictMode === "newId"
+      ? { ...importConflict.table, meta: { ...importConflict.table.meta, id: importConflictDraftNormalizedId } }
+      : importConflict.table;
+    const resolved = await run("处理导入表冲突", () => window.bgt.importDictionaryTable("project", conflictMode, tableToImport));
+    if (resolved?.status === "imported" && resolved.table) {
+      setSelectedTables((state) => ({ ...state, [resolved.table!.meta.tableType]: `project:${resolved.table!.meta.id}` }));
+      setImportConflict(null);
+      setImportConflictDraftId("");
+    } else if (resolved?.status === "conflict" && resolved.table) {
+      setImportConflict({ table: resolved.table, existing: resolved.existing });
+    }
+    await reloadTables();
+  };
+
   const deleteCurrentTable = async () => {
     if (!activeSummary || activeSummary.scope === "projectDefault") return;
-    await run("删除资源表", () => window.bgt.deleteDictionaryTable(activeSummary.scope, activeSummary.id), async () => {
+    await run("删除资源表", () => window.bgt.deleteDictionaryTable(activeSummary.scope, activeSummary.id, activeSummary.fileName), async () => {
       setDeleteOpen(false);
       await reloadTables();
       setSelectedTables((state) => ({ ...state, [activeTable]: `projectDefault:project.${activeTable}` }));
@@ -176,9 +214,12 @@ export default function AnalysisView({
     setInfoDraft({
       id: activeSummary.id,
       displayName: activeSummary.displayName,
+      gameName: activeSummary.gameName,
+      sourceLanguage: activeSummary.sourceLanguage,
+      targetLanguage: activeSummary.targetLanguage,
       description: activeSummary.description
     });
-  }, [infoOpen, activeSummary?.id, activeSummary?.displayName, activeSummary?.description]);
+  }, [infoOpen, activeSummary?.id, activeSummary?.displayName, activeSummary?.gameName, activeSummary?.sourceLanguage, activeSummary?.targetLanguage, activeSummary?.description]);
 
   const saveTableInfo = async () => {
     if (!activeSummary) return;
@@ -190,10 +231,13 @@ export default function AnalysisView({
       tableType: activeSummary.tableType,
       displayName: infoDraft.displayName.trim() || activeSummary.displayName,
       description: infoDraft.description.trim(),
+      gameName: infoDraft.gameName.trim(),
+      sourceLanguage: activeSummary.scope === "projectDefault" ? snapshot.project?.sourceLanguage ?? activeSummary.sourceLanguage : infoDraft.sourceLanguage,
+      targetLanguage: activeSummary.scope === "projectDefault" ? snapshot.project?.targetLanguage ?? activeSummary.targetLanguage : infoDraft.targetLanguage,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
-    await run("保存表信息", () => window.bgt.saveDictionaryTable(activeSummary.scope, { meta, rows: currentRows }), async (saved) => {
+    await run("保存表信息", () => window.bgt.saveDictionaryTable(activeSummary.scope, { meta, rows: currentRows }, activeSummary.fileName), async (saved) => {
       if (activeSummary.scope !== "projectDefault") setExternalTable(saved);
       await reloadTables();
       const nextKey = `${activeSummary.scope}:${saved.meta.id}`;
@@ -246,6 +290,7 @@ export default function AnalysisView({
       </div>
       <EditableResourceSections
         analysis={displayedAnalysis}
+        rowCounts={resourceRowCounts}
         textItems={snapshot.textItems}
         sourceLanguage={snapshot.project?.sourceLanguage}
         provider={provider}
@@ -278,7 +323,11 @@ export default function AnalysisView({
           <div className="dictionary-create-form">
             <label>
               <span>识别符</span>
-              <input value={infoDraft.id} disabled={activeSummary.scope === "projectDefault"} onChange={(event) => setInfoDraft((draft) => ({ ...draft, id: event.target.value }))} />
+              {activeSummary.scope === "projectDefault" ? (
+                <input value={infoDraft.id} disabled onChange={(event) => setInfoDraft((draft) => ({ ...draft, id: event.target.value }))} />
+              ) : (
+                <UserIdInput value={infoDraft.id} onChange={(id) => setInfoDraft((draft) => ({ ...draft, id }))} />
+              )}
             </label>
             <label>
               <span>显示名称</span>
@@ -287,6 +336,28 @@ export default function AnalysisView({
             <label>
               <span>类型</span>
               <input value={tableTypeLabel(activeSummary.tableType)} disabled />
+            </label>
+            <label>
+              <span>游戏名称</span>
+              <input value={infoDraft.gameName} onChange={(event) => setInfoDraft((draft) => ({ ...draft, gameName: event.target.value }))} />
+            </label>
+            <label>
+              <span>适用源语言</span>
+              <StyledSelect
+                value={infoDraft.sourceLanguage}
+                disabled={activeSummary.scope === "projectDefault"}
+                options={languageSelectOptions}
+                onChange={(sourceLanguage) => setInfoDraft((draft) => ({ ...draft, sourceLanguage }))}
+              />
+            </label>
+            <label>
+              <span>适用目标语言</span>
+              <StyledSelect
+                value={infoDraft.targetLanguage}
+                disabled={activeSummary.scope === "projectDefault"}
+                options={languageSelectOptions}
+                onChange={(targetLanguage) => setInfoDraft((draft) => ({ ...draft, targetLanguage }))}
+              />
             </label>
             <label>
               <span>功能描述</span>
@@ -305,7 +376,7 @@ export default function AnalysisView({
         <div className="dictionary-create-form">
           <label>
             <span>识别符</span>
-            <input value={saveToDictionaryDraft.id} onChange={(event) => setSaveToDictionaryDraft((draft) => ({ ...draft, id: event.target.value }))} />
+            <UserIdInput value={saveToDictionaryDraft.id} onChange={(id) => setSaveToDictionaryDraft((draft) => ({ ...draft, id }))} />
           </label>
           <label>
             <span>显示名称</span>
@@ -314,6 +385,18 @@ export default function AnalysisView({
           <label>
             <span>类型</span>
             <input value={tableTypeLabel(activeTable)} disabled />
+          </label>
+          <label>
+            <span>游戏名称</span>
+            <input value={saveToDictionaryDraft.gameName} onChange={(event) => setSaveToDictionaryDraft((draft) => ({ ...draft, gameName: event.target.value }))} />
+          </label>
+          <label>
+            <span>适用源语言</span>
+            <StyledSelect value={saveToDictionaryDraft.sourceLanguage} options={languageSelectOptions} onChange={(sourceLanguage) => setSaveToDictionaryDraft((draft) => ({ ...draft, sourceLanguage }))} />
+          </label>
+          <label>
+            <span>适用目标语言</span>
+            <StyledSelect value={saveToDictionaryDraft.targetLanguage} options={languageSelectOptions} onChange={(targetLanguage) => setSaveToDictionaryDraft((draft) => ({ ...draft, targetLanguage }))} />
           </label>
           <label>
             <span>功能描述</span>
@@ -331,7 +414,7 @@ export default function AnalysisView({
         <div className="dictionary-create-form">
           <label>
             <span>识别符</span>
-            <input value={exportDraft.id} onChange={(event) => setExportDraft((draft) => ({ ...draft, id: event.target.value }))} />
+            <UserIdInput value={exportDraft.id} onChange={(id) => setExportDraft((draft) => ({ ...draft, id }))} />
           </label>
           <label>
             <span>显示名称</span>
@@ -340,6 +423,18 @@ export default function AnalysisView({
           <label>
             <span>类型</span>
             <input value={tableTypeLabel(activeTable)} disabled />
+          </label>
+          <label>
+            <span>游戏名称</span>
+            <input value={exportDraft.gameName} onChange={(event) => setExportDraft((draft) => ({ ...draft, gameName: event.target.value }))} />
+          </label>
+          <label>
+            <span>适用源语言</span>
+            <StyledSelect value={exportDraft.sourceLanguage} options={languageSelectOptions} onChange={(sourceLanguage) => setExportDraft((draft) => ({ ...draft, sourceLanguage }))} />
+          </label>
+          <label>
+            <span>适用目标语言</span>
+            <StyledSelect value={exportDraft.targetLanguage} options={languageSelectOptions} onChange={(targetLanguage) => setExportDraft((draft) => ({ ...draft, targetLanguage }))} />
           </label>
           <label>
             <span>功能描述</span>
@@ -353,7 +448,7 @@ export default function AnalysisView({
           </div>
         </div>
       </AppDialog>
-      <AppDialog open={deleteOpen} title="删除资源表" description="此操作会删除当前选择的资源表，无法撤销。项目默认表不可删除。" compact onOpenChange={setDeleteOpen}>
+      <AppDialog open={deleteOpen} title="删除资源表" description="此操作会删除当前选择的这张表，无法撤销。" compact onOpenChange={setDeleteOpen}>
         <div className="delete-confirm-body">
           <p>
             确定删除 <strong>{activeSummary?.displayName ?? "当前表"}</strong> 吗？
@@ -364,12 +459,44 @@ export default function AnalysisView({
             </p>
           ) : null}
           <div className="dialog-actions">
-            <button className="secondary-button" onClick={() => setDeleteOpen(false)}>
-              取消
-            </button>
-            <button className="danger-button" disabled={!activeSummary || activeSummary.scope === "projectDefault" || busy} onClick={deleteCurrentTable}>
+            <button className="danger-action-button" disabled={!activeSummary || activeSummary.scope === "projectDefault" || busy} onClick={deleteCurrentTable}>
               <Trash2 size={16} />
               删除
+            </button>
+          </div>
+        </div>
+      </AppDialog>
+      <AppDialog
+        open={Boolean(importConflict)}
+        title="资源表冲突"
+        description="项目中已存在同 ID 的表。请选择覆盖现有项目表，或填写新 ID 后创建项目副本。"
+        compact
+        onOpenChange={(open) => {
+          if (open) return;
+          setImportConflict(null);
+          setImportConflictDraftId("");
+        }}
+      >
+        <div className="dictionary-create-form">
+          <p>
+            已存在 <strong>{importConflict?.existing?.displayName ?? importConflict?.table.meta.id ?? "同 ID 表"}</strong>
+          </p>
+          {importConflict ? (
+            <p className="settings-note">
+              {tableTypeLabel(importConflict.table.meta.tableType)} · {importConflict.table.rows.length} 行 · {importConflict.table.meta.id}
+            </p>
+          ) : null}
+          <label>
+            <span>新识别符</span>
+            <UserIdInput value={importConflictDraftId} onChange={setImportConflictDraftId} />
+          </label>
+          {importConflictDraftExists ? <p className="settings-note">这个识别符已经存在，请换一个。</p> : null}
+          <div className="dialog-actions">
+            <button className="secondary-button" disabled={busy || !importConflict || !importConflictDraftId.trim() || importConflictDraftExists} onClick={() => resolveImportConflict("newId")}>
+              创建新 ID
+            </button>
+            <button className="danger-action-button" disabled={busy || !importConflict} onClick={() => resolveImportConflict("overwrite")}>
+              覆盖
             </button>
           </div>
         </div>
@@ -389,6 +516,10 @@ function tableKey(summary: DictionaryTableSummary): string {
   return `${summary.scope}:${summary.id}`;
 }
 
+function isProjectResourceSummary(summary: DictionaryTableSummary): boolean {
+  return summary.scope === "projectDefault" || summary.scope === "project";
+}
+
 function scopeLabel(scope: DictionaryTableSummary["scope"]): string {
   if (scope === "global") return "全局词典";
   if (scope === "project") return "项目词典";
@@ -401,13 +532,27 @@ function rowsFor(analysis: AnalysisResult, table: ResourceTableId) {
   return analysis.noTranslate;
 }
 
+function totalRowCountForTableType(
+  table: ResourceTableId,
+  activeTable: ResourceTableId,
+  selectedTables: Record<ResourceTableId, string>,
+  summaries: DictionaryTableSummary[],
+  analysis: AnalysisResult,
+  externalTable: DictionaryTable | null
+): number {
+  const tableSummaries = summaries.filter((item) => item.tableType === table);
+  if (!tableSummaries.length) return rowsFor(analysis, table).length;
+  return tableSummaries.reduce((total, summary) => {
+    if (summary.scope === "projectDefault") return total + rowsFor(analysis, table).length;
+    if (table === activeTable && externalTable?.meta.tableType === table && tableKey(summary) === selectedTables[table]) {
+      return total + externalTable.rows.length;
+    }
+    return total + summary.rowCount;
+  }, 0);
+}
+
 function withRows(analysis: AnalysisResult, table: ResourceTableId, rows: DictionaryTable["rows"]): AnalysisResult {
   if (table === "characters") return { ...analysis, characters: rows as AnalysisResult["characters"] };
   if (table === "glossary") return { ...analysis, glossary: rows as AnalysisResult["glossary"] };
   return { ...analysis, noTranslate: rows as AnalysisResult["noTranslate"] };
-}
-
-function normalizeUserId(id: string): string {
-  const body = id.trim().replace(/^user\./, "").replace(/[^A-Za-z0-9_.-]/g, "_") || `table_${Date.now()}`;
-  return `user.${body}`;
 }

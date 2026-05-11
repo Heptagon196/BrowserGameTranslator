@@ -1609,6 +1609,7 @@ export function IssueTable({ issues, items, tableSettings, onProofreadIssues }: 
 
 export function EditableResourceSections({
   analysis,
+  rowCounts,
   textItems,
   sourceLanguage,
   provider,
@@ -1620,6 +1621,7 @@ export function EditableResourceSections({
   onTranslated
 }: {
   analysis: AnalysisResult;
+  rowCounts?: Partial<Record<ResourceTableId, number>>;
   textItems: TextItem[];
   sourceLanguage?: string;
   provider?: ProviderConfig;
@@ -1632,6 +1634,11 @@ export function EditableResourceSections({
 }) {
   const [localTable, setLocalTable] = useState<ResourceTableId>("characters");
   const table = activeTable ?? localTable;
+  const effectiveRowCounts = {
+    characters: rowCounts?.characters ?? analysis.characters.length,
+    glossary: rowCounts?.glossary ?? analysis.glossary.length,
+    noTranslate: rowCounts?.noTranslate ?? analysis.noTranslate.length
+  };
   const changeTable = (value: ResourceTableId) => {
     setLocalTable(value);
     onActiveTableChange?.(value);
@@ -1646,9 +1653,9 @@ export function EditableResourceSections({
     <div className="table-layout-with-tabs">
       <RadixTabs.Root value={table} onValueChange={(value) => changeTable(value as ResourceTableId)}>
         <RadixTabs.List className="table-tabs">
-          <RadixTabs.Trigger value="characters" className={table === "characters" ? "active" : ""}>人物 <span>{analysis.characters.length}</span></RadixTabs.Trigger>
-          <RadixTabs.Trigger value="glossary" className={table === "glossary" ? "active" : ""}>术语 <span>{analysis.glossary.length}</span></RadixTabs.Trigger>
-          <RadixTabs.Trigger value="noTranslate" className={table === "noTranslate" ? "active" : ""}>禁翻 <span>{analysis.noTranslate.length}</span></RadixTabs.Trigger>
+          <RadixTabs.Trigger value="characters" className={table === "characters" ? "active" : ""}>人物 <span>{effectiveRowCounts.characters}</span></RadixTabs.Trigger>
+          <RadixTabs.Trigger value="glossary" className={table === "glossary" ? "active" : ""}>术语 <span>{effectiveRowCounts.glossary}</span></RadixTabs.Trigger>
+          <RadixTabs.Trigger value="noTranslate" className={table === "noTranslate" ? "active" : ""}>禁翻 <span>{effectiveRowCounts.noTranslate}</span></RadixTabs.Trigger>
         </RadixTabs.List>
       </RadixTabs.Root>
       {tableControls}
@@ -1661,8 +1668,10 @@ export function EditableResourceSections({
   );
 }
 
-export function CharacterResourceTable({ rows, textItems, sourceLanguage, tableSettings, onChange, onTranslateRows }: { rows: CharacterEntry[]; textItems: TextItem[]; sourceLanguage?: string; tableSettings: TableSettings; onChange: (rows: CharacterEntry[]) => void; onTranslateRows?: (rows: CharacterEntry[]) => void | Promise<void> }) {
-  const update = (row: CharacterEntry, patch: Partial<CharacterEntry>) => onChange(updateRow(rows, row.id, patch));
+export function CharacterResourceTable({ rows, textItems, sourceLanguage, tableSettings, onChange, onTranslateRows, readOnly = false }: { rows: CharacterEntry[]; textItems: TextItem[]; sourceLanguage?: string; tableSettings: TableSettings; onChange: (rows: CharacterEntry[]) => void; onTranslateRows?: (rows: CharacterEntry[]) => void | Promise<void>; readOnly?: boolean }) {
+  const update = (row: CharacterEntry, patch: Partial<CharacterEntry>) => {
+    if (!readOnly) onChange(updateRow(rows, row.id, patch));
+  };
   return (
     <DataTable
       title="人物"
@@ -1673,29 +1682,31 @@ export function CharacterResourceTable({ rows, textItems, sourceLanguage, tableS
         sourceLanguage,
         getTerms: (row) => [row.source, row.familyName ?? "", row.givenName ?? ""]
       }}
-      onRowsChange={onChange}
-      onTranslateSelected={onTranslateRows}
-      createRow={() => ({ id: `char_${Date.now()}`, source: "", target: "", familyName: "", familyNameTranslation: "", givenName: "", givenNameTranslation: "", nicknameOf: "", note: "", enabled: true })}
+      onRowsChange={readOnly ? undefined : onChange}
+      onTranslateSelected={readOnly ? undefined : onTranslateRows}
+      createRow={readOnly ? undefined : () => ({ id: `char_${Date.now()}`, source: "", target: "", familyName: "", familyNameTranslation: "", givenName: "", givenNameTranslation: "", nicknameOf: "", note: "", enabled: true })}
       filters={[
         { label: "启用", value: "enabled", predicate: (row) => row.enabled },
         { label: "关闭", value: "disabled", predicate: (row) => !row.enabled },
         { label: "未译", value: "missing", predicate: (row) => !row.target.trim() }
       ]}
       columns={[
-        { key: "enabled", title: "启用", width: "64px", text: (row) => String(row.enabled), render: (row) => <ToggleSwitch checked={row.enabled} onChange={(enabled) => update(row, { enabled })} title="启用" /> },
-        { key: "source", title: "原名", width: "150px", text: (row) => row.source, render: (row) => <ResourceTextInput value={row.source} onCommit={(source) => update(row, { source })} /> },
-        { key: "target", title: "译名", width: "150px", text: (row) => row.target, render: (row) => <ResourceTextInput value={row.target} onCommit={(target) => update(row, { target })} /> },
-        { key: "family", title: "姓/姓译", width: "170px", text: (row) => `${row.familyName ?? ""} ${row.familyNameTranslation ?? ""}`, render: (row) => <div className="stacked-inputs"><ResourceTextInput value={row.familyName ?? ""} onCommit={(familyName) => update(row, { familyName })} /><ResourceTextInput value={row.familyNameTranslation ?? ""} onCommit={(familyNameTranslation) => update(row, { familyNameTranslation })} /></div> },
-        { key: "given", title: "名/名译", width: "170px", text: (row) => `${row.givenName ?? ""} ${row.givenNameTranslation ?? ""}`, render: (row) => <div className="stacked-inputs"><ResourceTextInput value={row.givenName ?? ""} onCommit={(givenName) => update(row, { givenName })} /><ResourceTextInput value={row.givenNameTranslation ?? ""} onCommit={(givenNameTranslation) => update(row, { givenNameTranslation })} /></div> },
-        { key: "note", title: "备注", text: (row) => row.note, render: (row) => <ResourceTextInput value={row.note} onCommit={(note) => update(row, { note })} /> },
-        { key: "nicknameOf", title: "本名角色", width: "150px", text: (row) => row.nicknameOf ?? "", render: (row) => <ResourceTextInput value={row.nicknameOf ?? ""} onCommit={(nicknameOf) => update(row, { nicknameOf })} /> }
+        { key: "enabled", title: "启用", width: "64px", text: (row) => String(row.enabled), render: (row) => <ToggleSwitch checked={row.enabled} onChange={(enabled) => update(row, { enabled })} title="启用" disabled={readOnly} /> },
+        { key: "source", title: "原名", width: "150px", text: (row) => row.source, render: (row) => <ResourceTextInput value={row.source} onCommit={(source) => update(row, { source })} readOnly={readOnly} /> },
+        { key: "target", title: "译名", width: "150px", text: (row) => row.target, render: (row) => <ResourceTextInput value={row.target} onCommit={(target) => update(row, { target })} readOnly={readOnly} /> },
+        { key: "family", title: "姓/姓译", width: "170px", text: (row) => `${row.familyName ?? ""} ${row.familyNameTranslation ?? ""}`, render: (row) => <div className="stacked-inputs"><ResourceTextInput value={row.familyName ?? ""} onCommit={(familyName) => update(row, { familyName })} readOnly={readOnly} /><ResourceTextInput value={row.familyNameTranslation ?? ""} onCommit={(familyNameTranslation) => update(row, { familyNameTranslation })} readOnly={readOnly} /></div> },
+        { key: "given", title: "名/名译", width: "170px", text: (row) => `${row.givenName ?? ""} ${row.givenNameTranslation ?? ""}`, render: (row) => <div className="stacked-inputs"><ResourceTextInput value={row.givenName ?? ""} onCommit={(givenName) => update(row, { givenName })} readOnly={readOnly} /><ResourceTextInput value={row.givenNameTranslation ?? ""} onCommit={(givenNameTranslation) => update(row, { givenNameTranslation })} readOnly={readOnly} /></div> },
+        { key: "note", title: "备注", text: (row) => row.note, render: (row) => <ResourceTextInput value={row.note} onCommit={(note) => update(row, { note })} readOnly={readOnly} /> },
+        { key: "nicknameOf", title: "本名角色", width: "150px", text: (row) => row.nicknameOf ?? "", render: (row) => <ResourceTextInput value={row.nicknameOf ?? ""} onCommit={(nicknameOf) => update(row, { nicknameOf })} readOnly={readOnly} /> }
       ]}
     />
   );
 }
 
-export function GlossaryResourceTable({ rows, textItems, sourceLanguage, tableSettings, onChange, onTranslateRows }: { rows: GlossaryEntry[]; textItems: TextItem[]; sourceLanguage?: string; tableSettings: TableSettings; onChange: (rows: GlossaryEntry[]) => void; onTranslateRows?: (rows: GlossaryEntry[]) => void | Promise<void> }) {
-  const update = (row: GlossaryEntry, patch: Partial<GlossaryEntry>) => onChange(updateRow(rows, row.id, patch));
+export function GlossaryResourceTable({ rows, textItems, sourceLanguage, tableSettings, onChange, onTranslateRows, readOnly = false }: { rows: GlossaryEntry[]; textItems: TextItem[]; sourceLanguage?: string; tableSettings: TableSettings; onChange: (rows: GlossaryEntry[]) => void; onTranslateRows?: (rows: GlossaryEntry[]) => void | Promise<void>; readOnly?: boolean }) {
+  const update = (row: GlossaryEntry, patch: Partial<GlossaryEntry>) => {
+    if (!readOnly) onChange(updateRow(rows, row.id, patch));
+  };
   return (
     <DataTable
       title="术语"
@@ -1706,9 +1717,9 @@ export function GlossaryResourceTable({ rows, textItems, sourceLanguage, tableSe
         sourceLanguage,
         getTerms: (row) => [{ text: row.source, isRegex: row.isRegex }]
       }}
-      onRowsChange={onChange}
-      onTranslateSelected={onTranslateRows}
-      createRow={() => ({ id: `term_${Date.now()}`, source: "", target: "", note: "", category: "术语", isRegex: false, enabled: true })}
+      onRowsChange={readOnly ? undefined : onChange}
+      onTranslateSelected={readOnly ? undefined : onTranslateRows}
+      createRow={readOnly ? undefined : () => ({ id: `term_${Date.now()}`, source: "", target: "", note: "", category: "术语", isRegex: false, enabled: true })}
       filters={[
         { label: "启用", value: "enabled", predicate: (row) => row.enabled },
         { label: "关闭", value: "disabled", predicate: (row) => !row.enabled },
@@ -1716,19 +1727,21 @@ export function GlossaryResourceTable({ rows, textItems, sourceLanguage, tableSe
         { label: "未译", value: "missing", predicate: (row) => !row.target.trim() }
       ]}
       columns={[
-        { key: "enabled", title: "启用", width: "64px", text: (row) => String(row.enabled), render: (row) => <ToggleSwitch checked={row.enabled} onChange={(enabled) => update(row, { enabled })} title="启用" /> },
-        { key: "source", title: "原文", width: "180px", text: (row) => row.source, render: (row) => <ResourceTextInput value={row.source} onCommit={(source) => update(row, { source })} /> },
-        { key: "target", title: "译文", width: "180px", text: (row) => row.target, render: (row) => <ResourceTextInput value={row.target} onCommit={(target) => update(row, { target })} /> },
-        { key: "category", title: "分类", width: "120px", text: (row) => row.category, render: (row) => <ResourceTextInput value={row.category} onCommit={(category) => update(row, { category })} /> },
-        { key: "isRegex", title: "正则", width: "64px", text: (row) => String(row.isRegex), render: (row) => <ToggleSwitch checked={row.isRegex} onChange={(isRegex) => update(row, { isRegex })} title="正则" /> },
-        { key: "note", title: "备注", text: (row) => row.note, render: (row) => <ResourceTextInput value={row.note} onCommit={(note) => update(row, { note })} /> }
+        { key: "enabled", title: "启用", width: "64px", text: (row) => String(row.enabled), render: (row) => <ToggleSwitch checked={row.enabled} onChange={(enabled) => update(row, { enabled })} title="启用" disabled={readOnly} /> },
+        { key: "source", title: "原文", width: "180px", text: (row) => row.source, render: (row) => <ResourceTextInput value={row.source} onCommit={(source) => update(row, { source })} readOnly={readOnly} /> },
+        { key: "target", title: "译文", width: "180px", text: (row) => row.target, render: (row) => <ResourceTextInput value={row.target} onCommit={(target) => update(row, { target })} readOnly={readOnly} /> },
+        { key: "category", title: "分类", width: "120px", text: (row) => row.category, render: (row) => <ResourceTextInput value={row.category} onCommit={(category) => update(row, { category })} readOnly={readOnly} /> },
+        { key: "isRegex", title: "正则", width: "64px", text: (row) => String(row.isRegex), render: (row) => <ToggleSwitch checked={row.isRegex} onChange={(isRegex) => update(row, { isRegex })} title="正则" disabled={readOnly} /> },
+        { key: "note", title: "备注", text: (row) => row.note, render: (row) => <ResourceTextInput value={row.note} onCommit={(note) => update(row, { note })} readOnly={readOnly} /> }
       ]}
     />
   );
 }
 
-export function NoTranslateResourceTable({ rows, textItems, sourceLanguage, tableSettings, onChange }: { rows: NoTranslateEntry[]; textItems: TextItem[]; sourceLanguage?: string; tableSettings: TableSettings; onChange: (rows: NoTranslateEntry[]) => void }) {
-  const update = (row: NoTranslateEntry, patch: Partial<NoTranslateEntry>) => onChange(updateRow(rows, row.id, patch));
+export function NoTranslateResourceTable({ rows, textItems, sourceLanguage, tableSettings, onChange, readOnly = false }: { rows: NoTranslateEntry[]; textItems: TextItem[]; sourceLanguage?: string; tableSettings: TableSettings; onChange: (rows: NoTranslateEntry[]) => void; readOnly?: boolean }) {
+  const update = (row: NoTranslateEntry, patch: Partial<NoTranslateEntry>) => {
+    if (!readOnly) onChange(updateRow(rows, row.id, patch));
+  };
   return (
     <DataTable
       title="禁翻"
@@ -1739,18 +1752,18 @@ export function NoTranslateResourceTable({ rows, textItems, sourceLanguage, tabl
         sourceLanguage,
         getTerms: (row) => [{ text: row.marker, isRegex: row.isRegex }]
       }}
-      onRowsChange={onChange}
-      createRow={() => ({ id: `nt_${Date.now()}`, marker: "", note: "", isRegex: false, enabled: true })}
+      onRowsChange={readOnly ? undefined : onChange}
+      createRow={readOnly ? undefined : () => ({ id: `nt_${Date.now()}`, marker: "", note: "", isRegex: false, enabled: true })}
       filters={[
         { label: "启用", value: "enabled", predicate: (row) => row.enabled },
         { label: "关闭", value: "disabled", predicate: (row) => !row.enabled },
         { label: "正则", value: "regex", predicate: (row) => row.isRegex }
       ]}
       columns={[
-        { key: "enabled", title: "启用", width: "64px", text: (row) => String(row.enabled), render: (row) => <ToggleSwitch checked={row.enabled} onChange={(enabled) => update(row, { enabled })} title="启用" /> },
-        { key: "marker", title: "标记", width: "240px", text: (row) => row.marker, render: (row) => <ResourceTextInput value={row.marker} onCommit={(marker) => update(row, { marker })} /> },
-        { key: "isRegex", title: "正则", width: "64px", text: (row) => String(row.isRegex), render: (row) => <ToggleSwitch checked={row.isRegex} onChange={(isRegex) => update(row, { isRegex })} title="正则" /> },
-        { key: "note", title: "备注", text: (row) => row.note, render: (row) => <ResourceTextInput value={row.note} onCommit={(note) => update(row, { note })} /> }
+        { key: "enabled", title: "启用", width: "64px", text: (row) => String(row.enabled), render: (row) => <ToggleSwitch checked={row.enabled} onChange={(enabled) => update(row, { enabled })} title="启用" disabled={readOnly} /> },
+        { key: "marker", title: "标记", width: "240px", text: (row) => row.marker, render: (row) => <ResourceTextInput value={row.marker} onCommit={(marker) => update(row, { marker })} readOnly={readOnly} /> },
+        { key: "isRegex", title: "正则", width: "64px", text: (row) => String(row.isRegex), render: (row) => <ToggleSwitch checked={row.isRegex} onChange={(isRegex) => update(row, { isRegex })} title="正则" disabled={readOnly} /> },
+        { key: "note", title: "备注", text: (row) => row.note, render: (row) => <ResourceTextInput value={row.note} onCommit={(note) => update(row, { note })} readOnly={readOnly} /> }
       ]}
     />
   );
@@ -1760,19 +1773,23 @@ function updateRow<T extends { id: string }>(rows: T[], id: string, patch: Parti
   return rows.map((row) => (row.id === id ? { ...row, ...patch } : row));
 }
 
-function ResourceTextInput({ value, onCommit }: { value: string; onCommit: (value: string) => void }) {
+function ResourceTextInput({ value, onCommit, readOnly = false }: { value: string; onCommit: (value: string) => void; readOnly?: boolean }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => {
     setDraft(value);
   }, [value]);
   const commit = () => {
+    if (readOnly) return;
     if (draft !== value) onCommit(draft);
   };
   return (
     <input
       value={draft}
+      readOnly={readOnly}
       onBlur={commit}
-      onChange={(event) => setDraft(event.target.value)}
+      onChange={(event) => {
+        if (!readOnly) setDraft(event.target.value);
+      }}
       onKeyDown={(event) => {
         if (event.key === "Enter") {
           event.currentTarget.blur();

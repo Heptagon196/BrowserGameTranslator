@@ -191,6 +191,9 @@ export function defaultResourceTableMeta(project: ProjectConfig, tableType: Reso
     tableType,
     displayName: labels[tableType],
     description: `${project.projectName} 的默认${labels[tableType].replace("项目", "")}`,
+    gameName: project.projectName,
+    sourceLanguage: project.sourceLanguage,
+    targetLanguage: project.targetLanguage,
     createdAt: project.createdAt || now,
     updatedAt: now
   };

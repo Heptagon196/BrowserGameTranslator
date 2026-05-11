@@ -234,7 +234,21 @@ export interface DictionaryTableMeta {
   tableType: ResourceTableType;
   displayName: string;
   description: string;
+  gameName: string;
+  sourceLanguage: string;
+  targetLanguage: string;
   createdAt: string;
+  updatedAt: string;
+  remote?: DictionaryTableRemote;
+}
+
+export interface DictionaryTableRemote {
+  sourceId: string;
+  discussionId: string;
+  discussionNumber: number;
+  url: string;
+  revision: number;
+  sha256: string;
   updatedAt: string;
 }
 
@@ -248,9 +262,14 @@ export interface DictionaryTable {
 export interface DictionaryTableSummary {
   scope: DictionaryScope | "projectDefault";
   id: string;
+  fileName?: string;
   tableType: ResourceTableType;
   displayName: string;
   description: string;
+  gameName: string;
+  sourceLanguage: string;
+  targetLanguage: string;
+  updateUrl?: string;
   rowCount: number;
   deletable: boolean;
 }
@@ -259,6 +278,199 @@ export interface DictionaryImportResult {
   status: "cancelled" | "imported" | "conflict";
   table?: DictionaryTable;
   existing?: DictionaryTableSummary;
+}
+
+export type OnlineDictionaryStorageMode = "inline" | "comments" | "compressedInline" | "compressedComments" | "attachment";
+export type OnlineDictionaryCompression = "none" | "gzip" | "zip";
+
+export interface OnlineDictionarySource {
+  id: string;
+  displayName: string;
+  url: string;
+  owner: string;
+  repo: string;
+  category: string;
+  enabled: boolean;
+  readonly?: boolean;
+}
+
+export interface OnlineDictionarySettings {
+  schemaVersion: 1;
+  sources: OnlineDictionarySource[];
+  useToken: boolean;
+}
+
+export interface OnlineDictionaryMeta {
+  schemaVersion: 1;
+  kind: "bgt.onlineDictionaryTable";
+  id: string;
+  tableType: ResourceTableType;
+  displayName: string;
+  description: string;
+  sourceLanguage: string;
+  targetLanguage: string;
+  gameName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OnlineDictionaryCommentPart {
+  index: number;
+  commentId: string;
+  rowCount: number;
+  sha256: string;
+}
+
+export interface OnlineDictionaryEncodedCommentPart {
+  index: number;
+  commentId: string;
+  byteLength: number;
+  sha256: string;
+}
+
+export type OnlineDictionaryManifest =
+  | {
+      schemaVersion: 1;
+      storage: {
+        mode: "inline";
+        revision: number;
+        rowCount: number;
+        sha256: string;
+      };
+    }
+  | {
+      schemaVersion: 1;
+      storage: {
+        mode: "comments";
+        revision: number;
+        rowCount: number;
+        sha256: string;
+        parts: OnlineDictionaryCommentPart[];
+      };
+    }
+  | {
+      schemaVersion: 1;
+      storage: {
+        mode: "compressedInline";
+        revision: number;
+        rowCount: number;
+        sha256: string;
+        compression: "gzip";
+        encoding: "base64";
+        byteLength: number;
+        compressedByteLength: number;
+      };
+    }
+  | {
+      schemaVersion: 1;
+      storage: {
+        mode: "compressedComments";
+        revision: number;
+        rowCount: number;
+        sha256: string;
+        compression: "gzip";
+        encoding: "base64";
+        byteLength: number;
+        compressedByteLength: number;
+        parts: OnlineDictionaryEncodedCommentPart[];
+      };
+    }
+  | {
+      schemaVersion: 1;
+      storage: {
+        mode: "attachment";
+        revision: number;
+        rowCount: number;
+        sha256: string;
+        url: string;
+        fileName: string;
+        compression: OnlineDictionaryCompression;
+        contentType?: string;
+      };
+    };
+
+export interface OnlineDictionarySummary {
+  sourceId: string;
+  discussionId: string;
+  discussionNumber: number;
+  url: string;
+  title: string;
+  author: string;
+  updatedAt: string;
+  introduction: string;
+  introductionHtml?: string;
+  meta: OnlineDictionaryMeta;
+  manifest?: OnlineDictionaryManifest;
+}
+
+export interface OnlineDictionaryListResult {
+  summaries: OnlineDictionarySummary[];
+  page: number;
+  hasNextPage: boolean;
+  hasPreviousPage: boolean;
+}
+
+export interface OnlineDictionaryTable {
+  summary: OnlineDictionarySummary;
+  rows: DictionaryTableRows;
+}
+
+export interface OnlineDictionaryConnectionTest {
+  ok: boolean;
+  message: string;
+}
+
+export interface OnlineDictionaryTokenStatus {
+  configured: boolean;
+  enabled: boolean;
+  login?: string;
+}
+
+export interface OnlineDictionarySubmissionOptions {
+  sourceId: string;
+  title: string;
+  introduction: string;
+  gameDisplayName: string;
+  sourceLanguage: string;
+  targetLanguage: string;
+}
+
+export interface OnlineDictionaryUpdateOptions extends OnlineDictionarySubmissionOptions {
+  discussion: string;
+  expectedRevision?: number;
+  expectedSha256?: string;
+}
+
+export interface OnlineDictionaryPublishResult {
+  url: string;
+  discussionId?: string;
+  discussionNumber?: number;
+  mode: OnlineDictionaryStorageMode;
+  revision?: number;
+  sha256?: string;
+}
+
+export interface OnlineDictionarySubmissionPackageResult {
+  directory: string;
+  bodyPath?: string;
+  guidePath?: string;
+  jsonlPath?: string;
+  gzipPath?: string;
+}
+
+export interface OnlineDictionaryInlineSubmissionResult {
+  canInline: boolean;
+  title: string;
+  body?: string;
+  comments?: Array<{
+    index: number;
+    body: string;
+    rowCount?: number;
+    byteLength?: number;
+  }>;
+  rowCount: number;
+  byteLength: number;
+  limit: number;
 }
 
 export interface ProofreadOptions {

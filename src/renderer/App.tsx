@@ -24,6 +24,7 @@ import type {
   AiBalanceSnapshot,
   AppStateSnapshot,
   CreateProjectInput,
+  DictionaryTableSummary,
   PackageFormat,
   PreviewStatus,
   ProofreadOptions,
@@ -459,7 +460,7 @@ function App() {
         )}
         {view === "dictionary" && (
           <Suspense fallback={null}>
-            <DictionaryView busy={busy} snapshot={snapshot} tableSettings={tableSettings} run={run} setSnapshot={setSnapshot} />
+            <DictionaryView busy={busy} snapshot={snapshot} tableSettings={tableSettings} run={run} showToast={showToast} />
           </Suspense>
         )}
         {view === "prompts" && (
@@ -782,16 +783,47 @@ function ProjectView({
 
 function MetricGrid({ snapshot }: { snapshot: AppStateSnapshot }) {
   const translatedCount = snapshot.textItems.filter((item) => item.status === "translated").length;
+  const fallbackResourceTotal = countDefaultResourceRows(snapshot.analysis);
+  const [resourceTableTotal, setResourceTableTotal] = useState(fallbackResourceTotal);
+
+  useEffect(() => {
+    let cancelled = false;
+    setResourceTableTotal(fallbackResourceTotal);
+    window.bgt
+      .listDictionaryTables()
+      .then((summaries) => {
+        if (!cancelled) setResourceTableTotal(countAllResourceRows(summaries, fallbackResourceTotal));
+      })
+      .catch(() => {
+        if (!cancelled) setResourceTableTotal(fallbackResourceTotal);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [snapshot.project?.projectRoot, fallbackResourceTotal]);
+
   return (
     <div className="metric-grid">
       <Metric label="项目目录" value={snapshot.project?.projectRoot ?? "-"} />
       <Metric label="扫描文件" value={String(snapshot.scanReport?.fileCount ?? 0)} />
       <Metric label="文本项" value={String(snapshot.textItems.length)} />
       <Metric label="已翻译" value={String(translatedCount)} />
-      <Metric label="术语项" value={String(snapshot.analysis.glossary.length)} />
+      <Metric label="术语项" value={String(resourceTableTotal)} />
       <Metric label="校对问题" value={String(snapshot.issues.length)} />
     </div>
   );
+}
+
+function countDefaultResourceRows(analysis: AnalysisResult): number {
+  return analysis.characters.length + analysis.glossary.length + analysis.noTranslate.length;
+}
+
+function countAllResourceRows(summaries: DictionaryTableSummary[], fallback: number): number {
+  const total = summaries
+    .filter((item) => item.scope === "projectDefault" || item.scope === "project")
+    .filter((item) => item.tableType === "characters" || item.tableType === "glossary" || item.tableType === "noTranslate")
+    .reduce((sum, item) => sum + item.rowCount, 0);
+  return total || fallback;
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

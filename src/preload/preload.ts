@@ -25,6 +25,17 @@ import {
   ItchDownloadProgress,
   ItchDownloadResult,
   OriginalSourceFile,
+  OnlineDictionaryConnectionTest,
+  OnlineDictionaryInlineSubmissionResult,
+  OnlineDictionaryListResult,
+  OnlineDictionaryPublishResult,
+  OnlineDictionarySettings,
+  OnlineDictionarySubmissionOptions,
+  OnlineDictionarySubmissionPackageResult,
+  OnlineDictionarySummary,
+  OnlineDictionaryTable,
+  OnlineDictionaryTokenStatus,
+  OnlineDictionaryUpdateOptions,
   PackageProjectInput,
   PackageProjectResult,
   PatchPreview,
@@ -41,6 +52,7 @@ import {
 } from "../shared/types";
 
 const api = {
+  copyText: (text: string): Promise<void> => ipcRenderer.invoke("clipboard:write-text", text),
   selectDirectory: (): Promise<string | null> => ipcRenderer.invoke("dialog:selectDirectory"),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke("external:open", url),
   createProject: (input: CreateProjectInput): Promise<AppStateSnapshot> => ipcRenderer.invoke("project:create", input),
@@ -109,16 +121,37 @@ const api = {
   translateAnalysisRows: (provider: ProviderConfig, selection: { table: "characters" | "glossary"; ids: string[] }): Promise<AnalysisResult> =>
     ipcRenderer.invoke("analysis:translateRows", provider, selection),
   listDictionaryTables: (): Promise<DictionaryTableSummary[]> => ipcRenderer.invoke("dictionary:list"),
-  loadDictionaryTable: (scope: DictionaryScope | "projectDefault", id: string, tableType: ResourceTableType): Promise<DictionaryTable> =>
-    ipcRenderer.invoke("dictionary:load", scope, id, tableType),
-  saveDictionaryTable: (scope: DictionaryScope | "projectDefault", table: DictionaryTable): Promise<DictionaryTable> =>
-    ipcRenderer.invoke("dictionary:save", scope, table),
+  loadDictionaryTable: (scope: DictionaryScope | "projectDefault", id: string, tableType: ResourceTableType, fileName?: string): Promise<DictionaryTable> =>
+    ipcRenderer.invoke("dictionary:load", scope, id, tableType, fileName),
+  saveDictionaryTable: (scope: DictionaryScope | "projectDefault", table: DictionaryTable, fileName?: string): Promise<DictionaryTable> =>
+    ipcRenderer.invoke("dictionary:save", scope, table, fileName),
   createEmptyDictionaryTable: (scope: DictionaryScope, tableType: ResourceTableType, meta: Partial<DictionaryTableMeta>): Promise<DictionaryTable> =>
     ipcRenderer.invoke("dictionary:createEmpty", scope, tableType, meta),
-  deleteDictionaryTable: (scope: DictionaryScope, id: string): Promise<void> => ipcRenderer.invoke("dictionary:delete", scope, id),
+  deleteDictionaryTable: (scope: DictionaryScope, id: string, fileName?: string): Promise<void> => ipcRenderer.invoke("dictionary:delete", scope, id, fileName),
   exportDictionaryTable: (table: DictionaryTable): Promise<string | null> => ipcRenderer.invoke("dictionary:export", table),
   importDictionaryTable: (scope: DictionaryScope, conflictMode?: "overwrite" | "newId", pendingTable?: DictionaryTable): Promise<DictionaryImportResult> =>
     ipcRenderer.invoke("dictionary:import", scope, conflictMode, pendingTable),
+  listOnlineDictionarySources: (): Promise<OnlineDictionarySettings> => ipcRenderer.invoke("online-dictionaries:list-sources"),
+  saveOnlineDictionarySources: (settings: OnlineDictionarySettings): Promise<OnlineDictionarySettings> => ipcRenderer.invoke("online-dictionaries:save-sources", settings),
+  getOnlineDictionaryTokenStatus: (): Promise<OnlineDictionaryTokenStatus> => ipcRenderer.invoke("online-dictionaries:token-status"),
+  saveOnlineDictionaryToken: (token: string): Promise<OnlineDictionaryTokenStatus> => ipcRenderer.invoke("online-dictionaries:save-token", token),
+  testOnlineDictionarySource: (sourceId: string): Promise<OnlineDictionaryConnectionTest> => ipcRenderer.invoke("online-dictionaries:test-source", sourceId),
+  listOnlineDictionaryTables: (sourceId: string, webSearchQuery?: string, page?: number, mineOnly?: boolean): Promise<OnlineDictionaryListResult> =>
+    ipcRenderer.invoke("online-dictionaries:list-tables", sourceId, webSearchQuery, page, mineOnly),
+  loadOnlineDictionaryTable: (sourceId: string, discussionId: string): Promise<OnlineDictionaryTable> => ipcRenderer.invoke("online-dictionaries:load-table", sourceId, discussionId),
+  loadOnlineDictionaryTableByUrl: (url: string): Promise<OnlineDictionaryTable> => ipcRenderer.invoke("online-dictionaries:load-table-by-url", url),
+  importOnlineDictionaryTable: (scope: DictionaryScope, sourceId: string, discussionId: string, conflictMode?: "overwrite" | "newId", pendingTable?: DictionaryTable): Promise<DictionaryImportResult> =>
+    ipcRenderer.invoke("online-dictionaries:import-table", scope, sourceId, discussionId, conflictMode, pendingTable),
+  publishOnlineDictionaryTable: (table: DictionaryTable, options: OnlineDictionarySubmissionOptions): Promise<OnlineDictionaryPublishResult> =>
+    ipcRenderer.invoke("online-dictionaries:publish-table", table, options),
+  updateOnlineDictionaryTable: (table: DictionaryTable, options: OnlineDictionaryUpdateOptions): Promise<OnlineDictionaryPublishResult> =>
+    ipcRenderer.invoke("online-dictionaries:update-table", table, options),
+  deleteOnlineDictionaryTable: (sourceId: string, discussionId: string): Promise<void> =>
+    ipcRenderer.invoke("online-dictionaries:delete-table", sourceId, discussionId),
+  exportOnlineDictionarySubmissionPackage: (table: DictionaryTable, options: OnlineDictionarySubmissionOptions): Promise<OnlineDictionarySubmissionPackageResult | null> =>
+    ipcRenderer.invoke("online-dictionaries:export-submission-package", table, options),
+  buildOnlineDictionaryInlineSubmission: (table: DictionaryTable, options: OnlineDictionarySubmissionOptions): Promise<OnlineDictionaryInlineSubmissionResult> =>
+    ipcRenderer.invoke("online-dictionaries:inline-submission", table, options),
   translate: (provider: ProviderConfig, targetLanguage: string): Promise<TextItem[]> =>
     ipcRenderer.invoke("translation:start", provider, targetLanguage),
   translateBatch: (provider: ProviderConfig, targetLanguage: string, items: TextItem[]): Promise<TextItem[]> =>

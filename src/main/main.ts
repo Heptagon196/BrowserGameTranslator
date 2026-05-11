@@ -1,7 +1,7 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { app, BrowserWindow, ipcMain, shell, Menu } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, shell, Menu } from "electron";
 import { getFonts } from "font-list";
 import { downloadAaOnlineGame, validateAaOfflineOutputDirectory } from "./aaofflineService";
 import { AgentChatHistoryService } from "./agent/agentChatHistoryService";
@@ -14,6 +14,7 @@ import { createEmptyDictionaryTable, deleteDictionaryTable, exportDictionaryTabl
 import { extractGameTexts } from "./extractors";
 import { exportTextItems, importTextItems } from "./importExport";
 import { analyzeLocally } from "./localAnalysis";
+import { buildOnlineDictionaryInlineSubmission, deleteOnlineDictionaryTable, exportOnlineDictionarySubmissionPackage, getOnlineDictionaryTokenStatus, importOnlineDictionaryTable as importRemoteDictionaryTable, listOnlineDictionarySources, listOnlineDictionaryTables, loadOnlineDictionaryTable, loadOnlineDictionaryTableByUrl, publishOnlineDictionaryTable, saveOnlineDictionarySources, saveOnlineDictionaryToken, testOnlineDictionarySource, updateOnlineDictionaryTable } from "./onlineDictionaryService";
 import { downloadItchHtml5Game } from "./itchService";
 import { applyPatch, previewPatch, restoreWorkingCopy } from "./patchService";
 import { openProjectDirectory as openProjectDirectoryInShell, packageProject } from "./packageService";
@@ -37,6 +38,9 @@ import {
   PromptConfig,
   PromptScope,
   ProviderConfig,
+  OnlineDictionarySettings,
+  OnlineDictionarySubmissionOptions,
+  OnlineDictionaryUpdateOptions,
   TextItem
 } from "../shared/types";
 
@@ -290,12 +294,37 @@ ipcMain.handle("analysis:local", async () => {
 });
 ipcMain.handle("analysis:save", async (_event, analysis) => projectService.saveAnalysis(analysis));
 ipcMain.handle("dictionary:list", async () => listDictionaryTables(optionalProject()));
-ipcMain.handle("dictionary:load", async (_event, scope, id, tableType) => loadDictionaryTable(scope, id, tableType, optionalProject()));
-ipcMain.handle("dictionary:save", async (_event, scope, table) => saveDictionaryTableFile(scope, table, optionalProject()));
+ipcMain.handle("dictionary:load", async (_event, scope, id, tableType, fileName) => loadDictionaryTable(scope, id, tableType, optionalProject(), fileName));
+ipcMain.handle("dictionary:save", async (_event, scope, table, fileName) => saveDictionaryTableFile(scope, table, optionalProject(), fileName));
 ipcMain.handle("dictionary:createEmpty", async (_event, scope, tableType, meta) => createEmptyDictionaryTable(scope, tableType, meta, optionalProject()));
-ipcMain.handle("dictionary:delete", async (_event, scope, id) => deleteDictionaryTable(scope, id, optionalProject()));
+ipcMain.handle("dictionary:delete", async (_event, scope, id, fileName) => deleteDictionaryTable(scope, id, optionalProject(), fileName));
 ipcMain.handle("dictionary:export", async (_event, table) => exportDictionaryTable(table));
 ipcMain.handle("dictionary:import", async (_event, scope, conflictMode, pendingTable) => importDictionaryTable(scope, optionalProject(), conflictMode, pendingTable));
+ipcMain.handle("clipboard:write-text", async (_event, text: string) => {
+  clipboard.writeText(text);
+});
+ipcMain.handle("online-dictionaries:list-sources", async () => listOnlineDictionarySources());
+ipcMain.handle("online-dictionaries:save-sources", async (_event, settings: OnlineDictionarySettings) => saveOnlineDictionarySources(settings));
+ipcMain.handle("online-dictionaries:token-status", async () => getOnlineDictionaryTokenStatus());
+ipcMain.handle("online-dictionaries:save-token", async (_event, token: string) => saveOnlineDictionaryToken(token));
+ipcMain.handle("online-dictionaries:test-source", async (_event, sourceId: string) => testOnlineDictionarySource(sourceId));
+ipcMain.handle("online-dictionaries:list-tables", async (_event, sourceId: string, webSearchQuery?: string, page?: number, mineOnly?: boolean) => listOnlineDictionaryTables(sourceId, webSearchQuery, page, mineOnly));
+ipcMain.handle("online-dictionaries:load-table", async (_event, sourceId: string, discussionId: string) => loadOnlineDictionaryTable(sourceId, discussionId));
+ipcMain.handle("online-dictionaries:load-table-by-url", async (_event, url: string) => loadOnlineDictionaryTableByUrl(url));
+ipcMain.handle("online-dictionaries:import-table", async (_event, arg1, arg2, arg3, arg4, arg5) => {
+  const hasExplicitScope = arg1 === "global" || arg1 === "project";
+  const scope = hasExplicitScope ? arg1 : (optionalProject() ? "project" : "global");
+  const sourceId = hasExplicitScope ? arg2 : arg1;
+  const discussionId = hasExplicitScope ? arg3 : arg2;
+  const conflictMode = hasExplicitScope ? arg4 : arg3;
+  const pendingTable = hasExplicitScope ? arg5 : arg4;
+  return importRemoteDictionaryTable(scope, sourceId, discussionId, optionalProject(), conflictMode, pendingTable);
+});
+ipcMain.handle("online-dictionaries:publish-table", async (_event, table, options: OnlineDictionarySubmissionOptions) => publishOnlineDictionaryTable(table, options));
+ipcMain.handle("online-dictionaries:update-table", async (_event, table, options: OnlineDictionaryUpdateOptions) => updateOnlineDictionaryTable(table, options));
+ipcMain.handle("online-dictionaries:delete-table", async (_event, sourceId: string, discussionId: string) => deleteOnlineDictionaryTable(sourceId, discussionId));
+ipcMain.handle("online-dictionaries:export-submission-package", async (_event, table, options: OnlineDictionarySubmissionOptions) => exportOnlineDictionarySubmissionPackage(table, options));
+ipcMain.handle("online-dictionaries:inline-submission", async (_event, table, options: OnlineDictionarySubmissionOptions) => buildOnlineDictionaryInlineSubmission(table, options));
 ipcMain.handle("analysis:translateMissing", async (_event, provider: ProviderConfig) => {
   const project = projectService.project;
   const analysis = await projectService.readAnalysis();

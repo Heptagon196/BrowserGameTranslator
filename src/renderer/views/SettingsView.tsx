@@ -1,6 +1,6 @@
 ﻿import React, { useEffect, useRef, useState } from "react";
-import { Plus, Save, Trash2 } from "lucide-react";
-import type { AppStateSnapshot, ProviderConfig } from "../../shared/types";
+import { ExternalLink, Plus, Save, Trash2 } from "lucide-react";
+import type { AppStateSnapshot, OnlineDictionarySource, ProviderConfig } from "../../shared/types";
 import { CommandSelect, FontSelect, FontSizeControl } from "../components/ui/Selectors";
 import { FieldRow } from "../components/ui/Form";
 import { StyledSelect, ToggleSwitch } from "../components/ui/Primitives";
@@ -24,6 +24,8 @@ import {
   providerModelNamesFor,
   type UiSettings
 } from "../settingsModel";
+const configuredGithubTokenPlaceholder = "configured-token";
+
 export default function SettingsView({
   snapshot,
   setSnapshot,
@@ -52,9 +54,15 @@ export default function SettingsView({
   const [providerModelOrder, setProviderModelOrder] = useState<Record<string, string[]>>({});
   const [systemFonts, setSystemFonts] = useState<string[]>([]);
   const [fontLoadError, setFontLoadError] = useState("");
+  const [onlineSources, setOnlineSources] = useState<OnlineDictionarySource[]>([]);
+  const [onlineUseGithubToken, setOnlineUseGithubToken] = useState(true);
+  const [selectedOnlineSourceId, setSelectedOnlineSourceId] = useState("");
+  const [githubTokenDraft, setGithubTokenDraft] = useState("");
+  const [githubTokenConfigured, setGithubTokenConfigured] = useState(false);
   const projectSettingsRef = useRef<HTMLElement | null>(null);
   const tableSettingsRef = useRef<HTMLElement | null>(null);
   const uiSettingsRef = useRef<HTMLElement | null>(null);
+  const onlineDictionaryRef = useRef<HTMLElement | null>(null);
   const providersSettingsRef = useRef<HTMLElement | null>(null);
   const modelsSettingsRef = useRef<HTMLElement | null>(null);
   const scrollToSettingsSection = (ref: React.RefObject<HTMLElement | null>) => {
@@ -83,6 +91,24 @@ export default function SettingsView({
       })
       .catch((error: unknown) => {
         if (!cancelled) setFontLoadError(error instanceof Error ? error.message : String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([window.bgt.listOnlineDictionarySources(), window.bgt.getOnlineDictionaryTokenStatus()])
+      .then(([settings, tokenStatus]) => {
+        if (cancelled) return;
+        setOnlineSources(settings.sources);
+        setOnlineUseGithubToken(settings.useToken !== false);
+        setSelectedOnlineSourceId(settings.sources[0]?.id ?? "");
+        setGithubTokenConfigured(tokenStatus.configured);
+        if (tokenStatus.configured) setGithubTokenDraft(configuredGithubTokenPlaceholder);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) showToast(error instanceof Error ? error.message : String(error), "error");
       });
     return () => {
       cancelled = true;
@@ -265,6 +291,54 @@ export default function SettingsView({
     setSnapshot((state) => ({ ...state, providers, activeProviderId: validProviderId, activeChatProviderId: validChatProviderId }));
     return providers;
   };
+  const selectedOnlineSource = onlineSources.find((source) => source.id === selectedOnlineSourceId) ?? onlineSources[0];
+  const selectedOnlineSourceReadonly = Boolean(selectedOnlineSource && isReadonlyOnlineSource(selectedOnlineSource));
+  const updateOnlineSource = (source: OnlineDictionarySource) => {
+    if (isReadonlyOnlineSource(source)) return;
+    setOnlineSources((sources) => sources.map((entry) => (entry.id === source.id ? source : entry)));
+  };
+  const addOnlineSource = () => {
+    const id = `source_${Date.now().toString(36)}`;
+    const source: OnlineDictionarySource = {
+      id,
+      displayName: "新在线词典库",
+      url: "https://github.com/Heptagon196/BrowserGameTranslator",
+      owner: "Heptagon196",
+      repo: "BrowserGameTranslator",
+      category: "词典",
+      enabled: true
+    };
+    setOnlineSources((sources) => [...sources, source]);
+    setSelectedOnlineSourceId(id);
+  };
+  const deleteOnlineSource = () => {
+    if (!selectedOnlineSource || isReadonlyOnlineSource(selectedOnlineSource) || onlineSources.length <= 1) return;
+    const next = onlineSources.filter((source) => source.id !== selectedOnlineSource.id);
+    setOnlineSources(next);
+    setSelectedOnlineSourceId(next[0]?.id ?? "");
+  };
+  const saveOnlineSources = async () => {
+    const settings = await window.bgt.saveOnlineDictionarySources({ schemaVersion: 1, sources: onlineSources, useToken: onlineUseGithubToken });
+    if (githubTokenDraft.trim() && githubTokenDraft !== configuredGithubTokenPlaceholder) {
+      await window.bgt.saveOnlineDictionaryToken(githubTokenDraft);
+      setGithubTokenConfigured(true);
+      setGithubTokenDraft(configuredGithubTokenPlaceholder);
+    }
+    setOnlineSources(settings.sources);
+    setOnlineUseGithubToken(settings.useToken !== false);
+    if (!settings.sources.some((source) => source.id === selectedOnlineSourceId)) setSelectedOnlineSourceId(settings.sources[0]?.id ?? "");
+    return settings;
+  };
+  const testOnlineSource = async () => {
+    if (!selectedOnlineSource) return;
+    const settings = await window.bgt.saveOnlineDictionarySources({ schemaVersion: 1, sources: onlineSources, useToken: onlineUseGithubToken });
+    setOnlineSources(settings.sources);
+    setOnlineUseGithubToken(settings.useToken !== false);
+    const sourceId = settings.sources.find((source) => source.id === selectedOnlineSource.id)?.id ?? settings.sources[0]?.id ?? "";
+    const result = await window.bgt.testOnlineDictionarySource(sourceId);
+    if (!result.ok) throw new Error(result.message);
+    return result;
+  };
   return (
     <div className="settings-shell">
       <nav className="settings-nav" aria-label="设置分类">
@@ -280,6 +354,7 @@ export default function SettingsView({
         <div className="settings-subnav">
           <button onClick={() => scrollToSettingsSection(tableSettingsRef)}>表格</button>
           <button onClick={() => scrollToSettingsSection(uiSettingsRef)}>界面</button>
+          <button onClick={() => scrollToSettingsSection(onlineDictionaryRef)}>在线词典</button>
         </div>
         <button className="settings-nav-primary" onClick={() => scrollToSettingsSection(providersSettingsRef)}>
           AI 后端
@@ -432,6 +507,86 @@ export default function SettingsView({
             </div>
           </div>
         </section>
+        <section ref={onlineDictionaryRef} className="settings-section">
+          <div className="panel">
+            <div className="prompt-header">
+              <div>
+                <h2>在线词典源</h2>
+                <p>配置 GitHub 仓库 URL 和 Discussions 分类。配置保存在本机，不写入项目工作区。</p>
+              </div>
+              <button className="secondary-button" onClick={addOnlineSource}>
+                <Plus size={16} />
+                添加源
+              </button>
+            </div>
+            <div className="model-config-layout">
+              <div className="model-config-list">
+                {onlineSources.map((source) => (
+                  <button
+                    key={source.id}
+                    className={source.id === selectedOnlineSource?.id ? "model-config-row active" : "model-config-row"}
+                    onClick={() => setSelectedOnlineSourceId(source.id)}
+                  >
+                    <strong>{source.displayName || source.url}</strong>
+                    <span>{source.owner}/{source.repo} · {source.category}{isReadonlyOnlineSource(source) ? " · 只读" : ""}</span>
+                  </button>
+                ))}
+              </div>
+              {selectedOnlineSource ? (
+                <div className="model-config-detail">
+                  <FieldRow label="显示名称" description="显示在词典页在线词典源下拉框中。">
+                    <input value={selectedOnlineSource.displayName} disabled={selectedOnlineSourceReadonly} onChange={(event) => updateOnlineSource({ ...selectedOnlineSource, displayName: event.target.value })} />
+                  </FieldRow>
+                  <FieldRow label="GitHub 仓库 URL" description="填写 GitHub 仓库地址。">
+                    <input value={selectedOnlineSource.url} disabled={selectedOnlineSourceReadonly} onChange={(event) => updateOnlineSource({ ...selectedOnlineSource, url: event.target.value })} />
+                  </FieldRow>
+                  <FieldRow label="Discussions 分类" description="默认使用“词典”。">
+                    <input value={selectedOnlineSource.category} disabled={selectedOnlineSourceReadonly} onChange={(event) => updateOnlineSource({ ...selectedOnlineSource, category: event.target.value })} />
+                  </FieldRow>
+                  <FieldRow label="启用" description="关闭后不会出现在词典页在线词典源列表中。">
+                    <ToggleSwitch checked={selectedOnlineSource.enabled} disabled={selectedOnlineSourceReadonly} onChange={() => updateOnlineSource({ ...selectedOnlineSource, enabled: !selectedOnlineSource.enabled })} />
+                  </FieldRow>
+                  <FieldRow label="使用 GitHub API Token" description="关闭后即使已保存 token，也按无 token 模式访问在线词典，方便测试公开网页抓取。">
+                    <ToggleSwitch checked={onlineUseGithubToken} onChange={() => setOnlineUseGithubToken((enabled) => !enabled)} />
+                  </FieldRow>
+                  <FieldRow
+                    label="GitHub API Token"
+                    description={
+                      <>
+                        非必填。只用于自动上传/更新词典、访问私有库，或提高 GitHub API 限额。输入新 token 后点击保存会替换。
+                        <button className="link-button" type="button" onClick={() => void window.bgt.openExternal("https://github.com/settings/tokens/new?scopes=public_repo")}>
+                          <ExternalLink size={14} />
+                          获取 Token
+                        </button>
+                      </>
+                    }
+                  >
+                    <input
+                      type="password"
+                      value={githubTokenDraft}
+                      onFocus={() => {
+                        if (githubTokenDraft === configuredGithubTokenPlaceholder) setGithubTokenDraft("");
+                      }}
+                      onChange={(event) => setGithubTokenDraft(event.target.value)}
+                      placeholder="粘贴 GitHub token"
+                    />
+                  </FieldRow>
+                  <div className="button-row">
+                    <button onClick={() => run("保存在线词典设置", saveOnlineSources, () => showToast("在线词典设置已保存"))}>
+                      <Save size={16} />
+                      保存
+                    </button>
+                    <button className="secondary-button" onClick={() => run("测试在线词典源", testOnlineSource, () => showToast("连接词典成功"))}>测试连接</button>
+                    <button className="danger-button" disabled={onlineSources.length <= 1 || selectedOnlineSourceReadonly} onClick={deleteOnlineSource}>
+                      <Trash2 size={16} />
+                      删除
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </section>
         <section ref={providersSettingsRef} className="settings-section">
           {snapshot.providers.length > 0 ? (
             <div className="panel">
@@ -479,6 +634,7 @@ export default function SettingsView({
                         <>
                           API Key 是调用该平台接口的凭证。不要分享给别人。
                           <button className="link-button" type="button" onClick={() => void window.bgt.openExternal(apiKeyLinkFor(selectedProvider))}>
+                            <ExternalLink size={14} />
                             获取 API Key
                           </button>
                         </>
@@ -647,6 +803,10 @@ export default function SettingsView({
       </div>
     </div>
   );
+}
+
+function isReadonlyOnlineSource(source: OnlineDictionarySource): boolean {
+  return source.readonly === true || source.id === "official";
 }
 
 

@@ -159,13 +159,14 @@ export function CheckboxControl({
   );
 }
 
-export function ToggleSwitch({ checked, onChange, title }: { checked: boolean; onChange: (checked: boolean) => void; title?: string }) {
+export function ToggleSwitch({ checked, onChange, title, disabled = false }: { checked: boolean; onChange: (checked: boolean) => void; title?: string; disabled?: boolean }) {
   return (
     <Switch.Root
       className="toggle-switch"
       checked={checked}
       onCheckedChange={onChange}
       title={title}
+      disabled={disabled}
     >
       <Switch.Thumb className="toggle-switch-thumb" />
     </Switch.Root>

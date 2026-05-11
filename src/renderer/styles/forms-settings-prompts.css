@@ -570,25 +570,48 @@
 }
 
 .field-row a,
-.link-button {
-  background: transparent;
-  border: 0;
-  border-radius: 0;
-  color: #1f6f78;
-  display: block;
+.field-row .link-button {
+  align-items: center;
+  background: #e7f8ee;
+  border: 1px solid #9dd7b6;
+  border-radius: 999px;
+  color: #126d3d;
+  display: flex;
   font-size: 13px;
+  font-weight: 700;
+  gap: 5px;
   justify-content: flex-start;
-  margin-top: 6px;
-  min-height: 0;
-  padding: 0;
+  margin-top: 8px;
+  min-height: 28px;
+  padding: 4px 10px;
   text-align: left;
   width: fit-content;
+}
+
+.field-row a:hover,
+.field-row .link-button:hover {
+  background: #d6f3e3;
+  border-color: #69bd8f;
+  color: #0d5c31;
 }
 
 .secondary-button {
   align-self: flex-start;
   background: #e8eef1;
   color: #20323c;
+}
+
+.danger-button {
+  align-self: flex-start;
+  background: #fff1f1;
+  border: 1px solid #efb5b5;
+  color: #8a2f2f;
+}
+
+.danger-button:hover:not(:disabled) {
+  background: #ffe4e4;
+  border-color: #d98282;
+  color: #722424;
 }
 
 .settings-note {
