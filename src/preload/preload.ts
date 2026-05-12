@@ -146,7 +146,7 @@ const api = {
     ipcRenderer.invoke("online-dictionaries:publish-table", table, options),
   updateOnlineDictionaryTable: (table: DictionaryTable, options: OnlineDictionaryUpdateOptions): Promise<OnlineDictionaryPublishResult> =>
     ipcRenderer.invoke("online-dictionaries:update-table", table, options),
-  deleteOnlineDictionaryTable: (sourceId: string, discussionId: string): Promise<void> =>
+  deleteOnlineDictionaryTable: (sourceId: string, discussionId: string): Promise<{ clearedLocalLinks: number }> =>
     ipcRenderer.invoke("online-dictionaries:delete-table", sourceId, discussionId),
   exportOnlineDictionarySubmissionPackage: (table: DictionaryTable, options: OnlineDictionarySubmissionOptions): Promise<OnlineDictionarySubmissionPackageResult | null> =>
     ipcRenderer.invoke("online-dictionaries:export-submission-package", table, options),

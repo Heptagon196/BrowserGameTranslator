@@ -29,7 +29,26 @@ import {
   OnlineDictionaryUpdateOptions,
   ProjectConfig
 } from "../shared/types";
-import { importDictionaryTable } from "./dictionaryService";
+import { clearDictionaryRemoteLinks, importDictionaryTable } from "./dictionaryService";
+import {
+  createGitHubDiscussionStore,
+  commentsByPartIndex as discussionCommentsByPartIndex,
+  escapeRegExp as escapeGitHubRegExp,
+  extractMarkedBlock as extractDiscussionMarkedBlock,
+  fetchGitHub as fetchGitHubRequest,
+  fetchText as fetchGitHubText,
+  GitHubDiscussionNode,
+  isAllowedAttachmentUrl as isGitHubAttachmentUrl,
+  isDiscussionNode as isGitHubDiscussionNode,
+  normalizeHash as normalizeDiscussionHash,
+  parseDiscussionNumber as parseGitHubDiscussionNumber,
+  parseGitHubDiscussionUrl as parseGitHubDiscussionLink,
+  parseGitHubRepositoryUrl as parseGitHubRepositoryLink,
+  parseJsonMarkedBlock as parseDiscussionJsonMarkedBlock,
+  sha256 as discussionSha256,
+  splitText as splitDiscussionText,
+  wrapBase64 as wrapDiscussionBase64
+} from "./githubDiscussionStore";
 import { readJson, writeJson } from "./storage";
 
 const gunzip = promisify(zlib.gunzip);
@@ -50,26 +69,21 @@ const defaultSource: OnlineDictionarySource = {
   readonly: true
 };
 
-type GitHubDiscussionNode = {
-  id: string;
-  number: number;
-  title: string;
-  url: string;
-  body: string;
-  bodyHTML?: string;
-  updatedAt: string;
-  author?: { login?: string | null } | null;
-  comments?: { nodes: Array<{ id: string; body: string } | null> } | null;
-  publicComments?: string[];
-  introductionHtml?: string;
-  attachmentUrls?: string[];
-};
-
 const tableTypeLabels: Record<OnlineDictionaryMeta["tableType"], string> = {
   characters: "人物表",
   glossary: "术语表",
   noTranslate: "禁翻表"
 };
+
+const githubDiscussions = createGitHubDiscussionStore<OnlineDictionarySource>({
+  settingsFileName: "online-dictionaries.json",
+  tokenFileName: "online-dictionary-secrets.json",
+  defaultSource,
+  defaultCategory: "词典",
+  tokenRequiredMessage: "自动上传词典需要 GitHub API Token。",
+  publicConnectionMessage: (source) => `已连接公开分类 ${source.owner}/${source.repo}/${source.category}。未使用 GitHub API Token。`,
+  tokenConnectionMessage: (source, categoryId) => `已连接 ${source.owner}/${source.repo}，找到分类 ${source.category}。${categoryId}`
+});
 
 function settingsPath(): string {
   return path.join(app.getPath("userData"), "online-dictionaries.json");
@@ -80,49 +94,23 @@ function tokenPath(): string {
 }
 
 export async function listOnlineDictionarySources(): Promise<OnlineDictionarySettings> {
-  const saved = await readJson<Partial<OnlineDictionarySettings>>(settingsPath(), { schemaVersion: 1, sources: [defaultSource], useToken: true });
-  const savedSources = saved.sources?.length ? saved.sources : [defaultSource];
-  const sources = normalizeSources(savedSources);
-  return { schemaVersion: 1, sources, useToken: saved.useToken !== false };
+  return githubDiscussions.listSources();
 }
 
 export async function saveOnlineDictionarySources(settings: OnlineDictionarySettings): Promise<OnlineDictionarySettings> {
-  const sources = normalizeSources(settings.sources);
-  const next: OnlineDictionarySettings = { schemaVersion: 1, sources, useToken: settings.useToken !== false };
-  await writeJson(settingsPath(), next);
-  return next;
+  return githubDiscussions.saveSources(settings);
 }
 
 export async function getOnlineDictionaryTokenStatus(): Promise<OnlineDictionaryTokenStatus> {
-  const token = (await loadStoredToken()).trim();
-  const enabled = await shouldUseToken();
-  if (!token) return { configured: false, enabled };
-  if (!enabled) return { configured: true, enabled: false };
-  try {
-    return { configured: true, enabled: true, login: await getViewerLogin() };
-  } catch {
-    return { configured: true, enabled: true };
-  }
+  return githubDiscussions.getTokenStatus();
 }
 
 export async function saveOnlineDictionaryToken(token: string): Promise<OnlineDictionaryTokenStatus> {
-  await writeJson(tokenPath(), { token: token.trim() });
-  return getOnlineDictionaryTokenStatus();
+  return githubDiscussions.saveToken(token);
 }
 
 export async function testOnlineDictionarySource(sourceId: string): Promise<OnlineDictionaryConnectionTest> {
-  try {
-    const source = await requireSource(sourceId);
-    if (!(await loadToken()).trim()) {
-      const categoryUrl = `https://github.com/${source.owner}/${source.repo}/discussions/categories/${encodeURIComponent(source.category)}`;
-      await fetchText(categoryUrl);
-      return { ok: true, message: `已连接公开分类 ${source.owner}/${source.repo}/${source.category}。未使用 GitHub API Token。` };
-    }
-    const categoryId = await findCategoryId(source);
-    return { ok: true, message: `已连接 ${source.owner}/${source.repo}，找到分类 ${source.category}。${categoryId}` };
-  } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) };
-  }
+  return githubDiscussions.testSource(sourceId);
 }
 
 export async function listOnlineDictionaryTables(sourceId: string, webSearchQuery = "", page = 1, mineOnly = false): Promise<OnlineDictionaryListResult> {
@@ -133,54 +121,15 @@ export async function listOnlineDictionaryTables(sourceId: string, webSearchQuer
 }
 
 async function searchOnlineDictionaryTables(source: OnlineDictionarySource, webSearchQuery = "", page = 1, mineOnly = false): Promise<OnlineDictionaryListResult> {
-  const safePage = Math.max(1, Math.floor(page));
-  const first = 20;
-  let after: string | null = null;
-  for (let currentPage = 1; currentPage <= safePage; currentPage += 1) {
-    type SearchResponse = {
-      search: {
-        discussionCount: number;
-        nodes: Array<GitHubDiscussionNode | Record<string, never> | null>;
-        pageInfo: { hasNextPage: boolean; endCursor: string | null };
-      };
-    };
-    const data: SearchResponse = await githubGraphqlWithToken<SearchResponse>(
-      `query SearchDictionaryDiscussions($query: String!, $first: Int!, $after: String) {
-        search(query: $query, type: DISCUSSION, first: $first, after: $after) {
-          discussionCount
-          nodes {
-            ... on Discussion {
-              id
-              number
-              title
-              url
-              body
-              updatedAt
-              author { login }
-            }
-          }
-          pageInfo { hasNextPage endCursor }
-        }
-      }`,
-      { query: buildGraphqlDiscussionSearchQuery(source, webSearchQuery, mineOnly ? await getViewerLogin() : ""), first, after }
-    );
-    if (currentPage === safePage) {
-      const summaries = data.search.nodes
-        .map((node: SearchResponse["search"]["nodes"][number]) => isDiscussionNode(node) ? parseDiscussionSummary(source.id, node) : null)
-        .filter((summary: OnlineDictionarySummary | null): summary is OnlineDictionarySummary => Boolean(summary));
-      return {
-        summaries,
-        page: safePage,
-        hasNextPage: data.search.pageInfo.hasNextPage,
-        hasPreviousPage: safePage > 1
-      };
-    }
-    if (!data.search.pageInfo.hasNextPage) {
-      return { summaries: [], page: safePage, hasNextPage: false, hasPreviousPage: safePage > 1 };
-    }
-    after = data.search.pageInfo.endCursor;
-  }
-  return { summaries: [], page: safePage, hasNextPage: false, hasPreviousPage: safePage > 1 };
+  const result = await githubDiscussions.searchDiscussionNodes(source, webSearchQuery, page, mineOnly);
+  return {
+    summaries: result.nodes
+      .map((node) => parseDiscussionSummary(source.id, node))
+      .filter((summary): summary is OnlineDictionarySummary => Boolean(summary)),
+    page: result.page,
+    hasNextPage: result.hasNextPage,
+    hasPreviousPage: result.hasPreviousPage
+  };
 }
 
 export async function loadOnlineDictionaryTable(sourceId: string, discussionId: string): Promise<OnlineDictionaryTable> {
@@ -405,7 +354,7 @@ export async function updateOnlineDictionaryTable(table: DictionaryTable, option
   return { url: current.url, discussionId: current.id, discussionNumber: current.number, mode: "compressedComments", revision, sha256: payload.jsonlSha256 };
 }
 
-export async function deleteOnlineDictionaryTable(sourceId: string, discussionId: string): Promise<void> {
+export async function deleteOnlineDictionaryTable(sourceId: string, discussionId: string, project?: ProjectConfig): Promise<{ clearedLocalLinks: number }> {
   const source = await requireSource(sourceId);
   const viewer = await getViewerLogin();
   const node = discussionId.startsWith("web:")
@@ -415,6 +364,13 @@ export async function deleteOnlineDictionaryTable(sourceId: string, discussionId
   if (!summary) throw new Error("目标 discussion 不是 BrowserGameTranslator 在线词典表。");
   if ((node.author?.login ?? "").toLowerCase() !== viewer.toLowerCase()) throw new Error("只能删除自己的投稿。");
   await deleteDiscussion(node.id);
+  const cleared = await clearDictionaryRemoteLinks({
+    sourceId,
+    discussionId: summary.discussionId,
+    discussionNumber: summary.discussionNumber,
+    url: summary.url
+  }, project);
+  return { clearedLocalLinks: cleared.updatedCount };
 }
 
 export async function exportOnlineDictionarySubmissionPackage(table: DictionaryTable, options: OnlineDictionarySubmissionOptions): Promise<OnlineDictionarySubmissionPackageResult | null> {
@@ -628,7 +584,7 @@ function buildCompressedPartComment(index: number, gzipBase64Part: string): stri
 }
 
 function wrapBase64(value: string): string {
-  return value.replace(/.{1,76}/g, "$&\n").trimEnd();
+  return wrapDiscussionBase64(value);
 }
 
 function buildSubmissionGuide(options: OnlineDictionarySubmissionOptions, bodyPath: string, jsonlPath: string, gzipPath: string, mode: "inline" | "attachment"): string {
@@ -700,12 +656,7 @@ function splitJsonl(jsonl: string, maxLength: number): string[] {
 }
 
 function splitText(value: string, maxLength: number): string[] {
-  if (!value) return [""];
-  const parts: string[] = [];
-  for (let index = 0; index < value.length; index += maxLength) {
-    parts.push(value.slice(index, index + maxLength));
-  }
-  return parts;
+  return splitDiscussionText(value, maxLength);
 }
 
 function countJsonlRows(jsonl: string): number {
@@ -832,10 +783,7 @@ function isAttachmentFileName(url: string, fileName: string): boolean {
 }
 
 function isAllowedAttachmentUrl(parsed: URL): boolean {
-  return parsed.protocol === "https:" && (
-    (parsed.hostname === "github.com" && parsed.pathname.startsWith("/user-attachments/")) ||
-    parsed.hostname === "user-attachments.githubusercontent.com"
-  );
+  return isGitHubAttachmentUrl(parsed);
 }
 
 async function extractZipText(data: Buffer): Promise<string> {
@@ -1147,12 +1095,7 @@ function collectHtmlComments(element: Element): string[] {
 }
 
 function commentsByPartIndex(comments: string[]): Map<string, string> {
-  const output = new Map<string, string>();
-  for (const comment of comments) {
-    const match = comment.match(/bgt-dictionary-(?:compressed-)?part\s+index=(\d+)/i) || comment.match(/BGT-PART-INDEX:\s*(\d+)/i);
-    if (match) output.set(match[1], comment);
-  }
-  return output;
+  return discussionCommentsByPartIndex(comments, "bgt-dictionary");
 }
 
 function buildGraphqlDiscussionSearchQuery(source: OnlineDictionarySource, webSearchQuery: string, author: string): string {
@@ -1169,28 +1112,15 @@ function quoteSearchToken(value: string): string {
 }
 
 function isDiscussionNode(node: unknown): node is GitHubDiscussionNode {
-  return Boolean(node && typeof node === "object" && "body" in node && "title" in node && "number" in node);
+  return isGitHubDiscussionNode(node);
 }
 
 async function fetchText(url: string): Promise<string> {
-  const response = await fetchGitHub(url);
-  if (!response.ok) throw new Error(`读取 GitHub 页面失败：HTTP ${response.status}`);
-  return response.text();
+  return fetchGitHubText(url);
 }
 
 async function fetchGitHub(url: string, init?: Parameters<typeof net.fetch>[1]): Promise<Response> {
-  try {
-    return await net.fetch(url, {
-      ...init,
-      headers: {
-        "User-Agent": "BrowserGameTranslator",
-        ...(init?.headers as Record<string, string> | undefined)
-      }
-    });
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`连接 GitHub 失败：${reason}。请检查网络、代理设置，或在设置里配置 GitHub API Token 后重试。`);
-  }
+  return fetchGitHubRequest(url, init);
 }
 
 function validateRow(row: Record<string, unknown>, tableType: OnlineDictionaryMeta["tableType"]): void {
@@ -1214,12 +1144,11 @@ function verifyJsonl(jsonl: string, expectedHash: string, expectedRows: number):
 }
 
 function sha256(value: string): string {
-  return `sha256:${crypto.createHash("sha256").update(value, "utf8").digest("hex")}`;
+  return discussionSha256(value);
 }
 
 function normalizeHash(value: string): string {
-  const trimmed = value.trim().toLowerCase();
-  return trimmed.startsWith("sha256:") ? trimmed.slice("sha256:".length) : trimmed;
+  return normalizeDiscussionHash(value);
 }
 
 function parseDiscussionSummary(sourceId: string, node: GitHubDiscussionNode): OnlineDictionarySummary | null {
@@ -1296,140 +1225,31 @@ function validateManifest(manifest: OnlineDictionaryManifest): void {
 }
 
 function parseJsonMarkedBlock<T>(body: string, marker: string): T | null {
-  const value = extractMarkedBlock(body, marker);
-  if (!value) return null;
-  return JSON.parse(value) as T;
+  return parseDiscussionJsonMarkedBlock<T>(body, marker);
 }
 
 function extractMarkedBlock(body: string, marker: string): string | null {
-  const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = body.match(new RegExp(`${escaped}-BEGIN\\s*\\r?\\n([\\s\\S]*?)\\r?\\n${escaped}-END`, "i"));
-  return match?.[1] ?? null;
+  return extractDiscussionMarkedBlock(body, marker);
 }
 
 async function loadDiscussionNode(discussionId: string): Promise<GitHubDiscussionNode> {
-  const data = await githubGraphql<{ node: GitHubDiscussionNode | null }>(
-    `query DiscussionById($id: ID!) {
-      node(id: $id) {
-        ... on Discussion {
-          id
-          number
-          title
-          url
-          body
-          bodyHTML
-          updatedAt
-          author { login }
-          comments(first: 100) {
-            nodes {
-              id
-              body
-            }
-          }
-        }
-      }
-    }`,
-    { id: discussionId }
-  );
-  if (!data.node) throw new Error("找不到远程词典 discussion。");
-  return hydrateDiscussionNode(data.node);
+  return githubDiscussions.loadDiscussionNode(discussionId);
 }
 
 async function loadDiscussionNodeByRepositoryNumber(source: OnlineDictionarySource, number: number): Promise<GitHubDiscussionNode> {
-  const data = await githubGraphqlWithToken<{ repository: { discussion: GitHubDiscussionNode | null } | null }>(
-    `query DiscussionByNumber($owner: String!, $repo: String!, $number: Int!) {
-      repository(owner: $owner, name: $repo) {
-        discussion(number: $number) {
-          id
-          number
-          title
-          url
-          body
-          bodyHTML
-          updatedAt
-          author { login }
-          comments(first: 100) {
-            nodes {
-              id
-              body
-            }
-          }
-        }
-      }
-    }`,
-    { owner: source.owner, repo: source.repo, number }
-  );
-  if (!data.repository?.discussion) throw new Error("找不到远程词典 discussion。");
-  return hydrateDiscussionNode(data.repository.discussion);
-}
-
-function hydrateDiscussionNode(node: GitHubDiscussionNode): GitHubDiscussionNode {
-  return {
-    ...node,
-    publicComments: node.publicComments ?? node.comments?.nodes.map((comment) => comment?.body ?? "").filter(Boolean),
-    attachmentUrls: node.attachmentUrls?.length ? node.attachmentUrls : extractAttachmentUrlsFromHtml(node.bodyHTML)
-  };
+  return githubDiscussions.loadDiscussionNodeByRepositoryNumber(source, number);
 }
 
 async function loadDiscussionComments(ids: string[]): Promise<Map<string, string>> {
-  const output = new Map<string, string>();
-  for (let index = 0; index < ids.length; index += 50) {
-    const batch = ids.slice(index, index + 50);
-    const data = await githubGraphql<{ nodes: Array<{ id: string; body: string } | null> }>(
-      `query DiscussionCommentsById($ids: [ID!]!) {
-        nodes(ids: $ids) {
-          ... on DiscussionComment {
-            id
-            body
-          }
-        }
-      }`,
-      { ids: batch }
-    );
-    for (const node of data.nodes) {
-      if (node?.id) output.set(node.id, node.body);
-    }
-  }
-  return output;
+  return githubDiscussions.loadDiscussionComments(ids);
 }
 
 async function findCategoryId(source: OnlineDictionarySource): Promise<string> {
-  const data = await githubGraphql<{
-    repository: { discussionCategories: { nodes: Array<{ id: string; name: string; slug: string }> } } | null;
-  }>(
-    `query DiscussionCategories($owner: String!, $repo: String!) {
-      repository(owner: $owner, name: $repo) {
-        discussionCategories(first: 100) {
-          nodes { id name slug }
-        }
-      }
-    }`,
-    { owner: source.owner, repo: source.repo }
-  );
-  if (!data.repository) throw new Error("GitHub 仓库不存在或无权访问。");
-  const category = data.repository.discussionCategories.nodes.find((item) => item.name === source.category || item.slug === source.category);
-  if (!category) throw new Error(`找不到 Discussions 分类：${source.category}`);
-  return category.id;
+  return githubDiscussions.findCategoryId(source);
 }
 
 async function loadRepositoryPublishInfo(source: OnlineDictionarySource): Promise<{ repositoryId: string; categoryId: string }> {
-  const data = await githubGraphqlWithToken<{
-    repository: { id: string; discussionCategories: { nodes: Array<{ id: string; name: string; slug: string }> } } | null;
-  }>(
-    `query RepositoryPublishInfo($owner: String!, $repo: String!) {
-      repository(owner: $owner, name: $repo) {
-        id
-        discussionCategories(first: 100) {
-          nodes { id name slug }
-        }
-      }
-    }`,
-    { owner: source.owner, repo: source.repo }
-  );
-  if (!data.repository) throw new Error("GitHub 仓库不存在或无权访问。");
-  const category = data.repository.discussionCategories.nodes.find((item) => item.name === source.category || item.slug === source.category);
-  if (!category) throw new Error(`找不到 Discussions 分类：${source.category}`);
-  return { repositoryId: data.repository.id, categoryId: category.id };
+  return githubDiscussions.loadRepositoryPublishInfo(source);
 }
 
 async function assertNoRemoteConflict(source: OnlineDictionarySource, tableId: string, title: string): Promise<void> {
@@ -1441,138 +1261,55 @@ async function assertNoRemoteConflict(source: OnlineDictionarySource, tableId: s
 }
 
 async function createDiscussion(repositoryId: string, categoryId: string, title: string, body: string): Promise<{ id: string; number: number; url: string }> {
-  const data = await githubGraphqlWithToken<{
-    createDiscussion: { discussion: { id: string; number: number; url: string } | null } | null;
-  }>(
-    `mutation CreateDiscussion($repositoryId: ID!, $categoryId: ID!, $title: String!, $body: String!) {
-      createDiscussion(input: {repositoryId: $repositoryId, categoryId: $categoryId, title: $title, body: $body}) {
-        discussion { id number url }
-      }
-    }`,
-    { repositoryId, categoryId, title, body }
-  );
-  const discussion = data.createDiscussion?.discussion;
-  if (!discussion) throw new Error("GitHub 没有返回新建 discussion。");
-  return discussion;
+  return githubDiscussions.createDiscussion(repositoryId, categoryId, title, body);
 }
 
 async function addDiscussionComment(discussionId: string, body: string): Promise<{ id: string }> {
-  const data = await githubGraphqlWithToken<{
-    addDiscussionComment: { comment: { id: string } | null } | null;
-  }>(
-    `mutation AddDiscussionComment($discussionId: ID!, $body: String!) {
-      addDiscussionComment(input: {discussionId: $discussionId, body: $body}) {
-        comment { id }
-      }
-    }`,
-    { discussionId, body }
-  );
-  const comment = data.addDiscussionComment?.comment;
-  if (!comment) throw new Error("GitHub 没有返回新建 comment。");
-  return comment;
+  return githubDiscussions.addDiscussionComment(discussionId, body);
 }
 
 async function updateDiscussion(discussionId: string, title: string, body: string): Promise<void> {
-  await githubGraphqlWithToken(
-    `mutation UpdateDiscussion($discussionId: ID!, $title: String!, $body: String!) {
-      updateDiscussion(input: {discussionId: $discussionId, title: $title, body: $body}) {
-        discussion { id }
-      }
-    }`,
-    { discussionId, title, body }
-  );
+  await githubDiscussions.updateDiscussion(discussionId, title, body);
 }
 
 async function deleteDiscussion(discussionId: string): Promise<void> {
-  await githubGraphqlWithToken(
-    `mutation DeleteDiscussion($discussionId: ID!) {
-      deleteDiscussion(input: {id: $discussionId}) {
-        discussion { id }
-      }
-    }`,
-    { discussionId }
-  );
+  await githubDiscussions.deleteDiscussion(discussionId);
 }
 
 async function getViewerLogin(): Promise<string> {
-  const data = await githubGraphqlWithToken<{ viewer: { login: string } }>(
-    `query ViewerLogin {
-      viewer { login }
-    }`,
-    {}
-  );
-  return data.viewer.login;
+  return githubDiscussions.getViewerLogin();
 }
 
 async function githubGraphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
-  const token = (await loadToken()).trim();
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "User-Agent": "BrowserGameTranslator"
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const response = await fetchGitHub("https://api.github.com/graphql", {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ query, variables })
-  });
-  const text = await response.text();
-  const payload = JSON.parse(text) as { data?: T; errors?: Array<{ message: string }> };
-  if (!response.ok) throw new Error(`GitHub API 请求失败：HTTP ${response.status}`);
-  if (payload.errors?.length) throw new Error(payload.errors.map((error) => error.message).join("\n"));
-  if (!payload.data) throw new Error("GitHub API 没有返回数据。");
-  return payload.data;
+  return githubDiscussions.githubGraphql<T>(query, variables);
 }
 
 async function githubGraphqlWithToken<T>(query: string, variables: Record<string, unknown>): Promise<T> {
-  const token = (await loadToken()).trim();
-  if (!token) throw new Error("自动上传词典需要 GitHub API Token。");
-  return githubGraphql<T>(query, variables);
+  return githubDiscussions.githubGraphqlWithToken<T>(query, variables);
 }
 
 async function loadToken(): Promise<string> {
-  if (!(await shouldUseToken())) return "";
-  return loadStoredToken();
+  return githubDiscussions.loadToken();
 }
 
 async function loadStoredToken(): Promise<string> {
-  const secrets = await readJson<{ token: string }>(tokenPath(), { token: "" });
-  return secrets.token ?? "";
+  return githubDiscussions.loadStoredToken();
 }
 
 async function shouldUseToken(): Promise<boolean> {
-  const settings = await readJson<Partial<OnlineDictionarySettings>>(settingsPath(), { schemaVersion: 1, sources: [defaultSource], useToken: true });
-  return settings.useToken !== false;
+  return githubDiscussions.shouldUseToken();
 }
 
 async function requireSource(sourceId: string): Promise<OnlineDictionarySource> {
-  const settings = await listOnlineDictionarySources();
-  const source = settings.sources.find((item) => item.id === sourceId);
-  if (!source) throw new Error("找不到在线词典源。");
-  return source;
+  return githubDiscussions.requireSource(sourceId);
 }
 
 function normalizeSource(source: OnlineDictionarySource): OnlineDictionarySource {
-  if (source.id === defaultSource.id) return defaultSource;
-  const parsed = parseGitHubRepositoryUrl(source.url);
-  const owner = parsed.owner || source.owner;
-  const repo = parsed.repo || source.repo;
-  return {
-    ...source,
-    id: source.id.trim() || `source_${Date.now()}`,
-    displayName: source.displayName.trim() || `${owner}/${repo}`,
-    url: `https://github.com/${owner}/${repo}`,
-    owner,
-    repo,
-    category: source.category.trim() || "词典",
-    enabled: source.enabled !== false,
-    readonly: false
-  };
+  return githubDiscussions.normalizeSource(source);
 }
 
 function normalizeSources(sources: OnlineDictionarySource[]): OnlineDictionarySource[] {
-  const normalized = sources.filter((source) => source.id !== defaultSource.id).map(normalizeSource);
-  return [defaultSource, ...normalized];
+  return githubDiscussions.normalizeSources(sources);
 }
 
 function sanitizeFileName(value: string): string {
@@ -1602,36 +1339,17 @@ function cleanAttachmentName(value: string): string {
 }
 
 function parseDiscussionNumber(value: string): number {
-  const trimmed = value.trim();
-  if (/^\d+$/.test(trimmed)) return Number(trimmed);
-  try {
-    const parsed = new URL(trimmed);
-    const match = parsed.pathname.match(/\/discussions\/(\d+)/);
-    if (!match) throw new Error("请输入已有 discussion 的编号或 URL。");
-    return Number(match[1]);
-  } catch {
-    throw new Error("请输入已有 discussion 的编号或 URL。");
-  }
+  return parseGitHubDiscussionNumber(value);
 }
 
 function parseGitHubDiscussionUrl(value: string): { owner: string; repo: string; number: number } {
-  const trimmed = value.trim();
-  const parsed = new URL(trimmed);
-  if (parsed.protocol !== "https:" || parsed.hostname !== "github.com") throw new Error("请输入 GitHub discussion 链接。");
-  const match = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/discussions\/(\d+)\/?$/);
-  if (!match) throw new Error("请输入 GitHub discussion 链接，例如 https://github.com/owner/repo/discussions/1。");
-  return { owner: match[1], repo: match[2], number: Number(match[3]) };
+  return parseGitHubDiscussionLink(value);
 }
 
 function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return escapeGitHubRegExp(value);
 }
 
 export function parseGitHubRepositoryUrl(url: string): { owner: string; repo: string } {
-  const parsed = new URL(url.trim());
-  if (parsed.protocol !== "https:" || parsed.hostname !== "github.com") throw new Error("请输入 GitHub 仓库 URL。");
-  const segments = parsed.pathname.split("/").filter(Boolean);
-  if (segments.length < 2) throw new Error("请输入 GitHub 仓库 URL。");
-  if (segments[2] === "discussions" && segments[3]) throw new Error("源配置不能填写具体 discussion URL。");
-  return { owner: segments[0], repo: segments[1] };
+  return parseGitHubRepositoryLink(url);
 }

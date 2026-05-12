@@ -7,6 +7,7 @@ import {
   DictionaryScope,
   DictionaryTable,
   DictionaryTableMeta,
+  DictionaryTableRemote,
   DictionaryTableRows,
   DictionaryTableSummary,
   GlossaryEntry,
@@ -268,6 +269,33 @@ export async function deleteDictionaryTable(scope: DictionaryScope, id: string, 
   await fs.unlink(fileName ? tableFilePath(scope, fileName, project) : tablePath(scope, id, project));
 }
 
+export interface ClearDictionaryRemoteLinksTarget {
+  sourceId?: string;
+  discussionId?: string;
+  discussionNumber?: number;
+  url?: string;
+}
+
+export async function clearDictionaryRemoteLinks(target: ClearDictionaryRemoteLinksTarget, project?: ProjectConfig): Promise<{ updatedCount: number }> {
+  let updatedCount = 0;
+  const clearTable = async (scope: DictionaryScope | "projectDefault", summary: DictionaryTableSummary): Promise<void> => {
+    const table = await loadDictionaryTable(scope, summary.id, summary.tableType, project, summary.fileName);
+    if (!table.meta.remote || !remoteMatches(table.meta.remote, target)) return;
+    await saveDictionaryTable(scope, { ...table, meta: { ...table.meta, remote: undefined } }, project, summary.fileName);
+    updatedCount += 1;
+  };
+
+  const globalSummaries = await listScope("global", project);
+  for (const summary of globalSummaries) await clearTable("global", summary);
+
+  if (project) {
+    const projectSummaries = (await listDictionaryTables(project)).filter((summary) => summary.scope === "project" || summary.scope === "projectDefault");
+    for (const summary of projectSummaries) await clearTable(summary.scope, summary);
+  }
+
+  return { updatedCount };
+}
+
 export async function exportDictionaryTable(table: DictionaryTable): Promise<string | null> {
   const result = await dialog.showSaveDialog({
     title: "导出词典表",
@@ -296,4 +324,15 @@ export async function importDictionaryTable(scope: DictionaryScope, project?: Pr
   if (existing && conflictMode === "newId") return { status: "conflict", table: normalized, existing };
   const saved = await saveDictionaryTable(scope, normalized, project);
   return { status: "imported", table: saved };
+}
+
+function remoteMatches(remote: DictionaryTableRemote, target: ClearDictionaryRemoteLinksTarget): boolean {
+  if (target.url && normalizeRemoteUrl(remote.url) === normalizeRemoteUrl(target.url)) return true;
+  if (target.sourceId && target.discussionId && remote.sourceId === target.sourceId && remote.discussionId === target.discussionId) return true;
+  if (target.sourceId && target.discussionNumber && remote.sourceId === target.sourceId && remote.discussionNumber === target.discussionNumber) return true;
+  return false;
+}
+
+function normalizeRemoteUrl(value: string): string {
+  return value.trim().replace(/\/+$/, "").toLowerCase();
 }

@@ -322,7 +322,7 @@ ipcMain.handle("online-dictionaries:import-table", async (_event, arg1, arg2, ar
 });
 ipcMain.handle("online-dictionaries:publish-table", async (_event, table, options: OnlineDictionarySubmissionOptions) => publishOnlineDictionaryTable(table, options));
 ipcMain.handle("online-dictionaries:update-table", async (_event, table, options: OnlineDictionaryUpdateOptions) => updateOnlineDictionaryTable(table, options));
-ipcMain.handle("online-dictionaries:delete-table", async (_event, sourceId: string, discussionId: string) => deleteOnlineDictionaryTable(sourceId, discussionId));
+ipcMain.handle("online-dictionaries:delete-table", async (_event, sourceId: string, discussionId: string) => deleteOnlineDictionaryTable(sourceId, discussionId, optionalProject()));
 ipcMain.handle("online-dictionaries:export-submission-package", async (_event, table, options: OnlineDictionarySubmissionOptions) => exportOnlineDictionarySubmissionPackage(table, options));
 ipcMain.handle("online-dictionaries:inline-submission", async (_event, table, options: OnlineDictionarySubmissionOptions) => buildOnlineDictionaryInlineSubmission(table, options));
 ipcMain.handle("analysis:translateMissing", async (_event, provider: ProviderConfig) => {

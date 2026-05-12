@@ -7,6 +7,7 @@ import type {
   CharacterEntry,
   DictionaryTable,
   DictionaryTableMeta,
+  DictionaryTableRemote,
   DictionaryTableRows,
   DictionaryTableSummary,
   GlossaryEntry,
@@ -724,13 +725,26 @@ export default function DictionaryView({
 
   const deleteOnlineSubmission = async () => {
     if (!onlineTable) return;
-    await run("删除在线投稿", () => window.bgt.deleteOnlineDictionaryTable(onlineTable.summary.sourceId, onlineTable.summary.discussionId), async () => {
-      showToast("在线投稿已删除。");
+    const deletedSummary = onlineTable.summary;
+    const selectedTableMatched = Boolean(table?.meta.remote && localRemoteMatchesOnlineSummary(table.meta.remote, deletedSummary));
+    await run("删除在线投稿", () => window.bgt.deleteOnlineDictionaryTable(onlineTable.summary.sourceId, onlineTable.summary.discussionId), (result) => {
+      showToast(result.clearedLocalLinks ? `在线投稿已删除，已清理 ${result.clearedLocalLinks} 张本地表的远程地址。` : "在线投稿已删除。");
+      setTable((current) => current?.meta.remote && localRemoteMatchesOnlineSummary(current.meta.remote, deletedSummary)
+        ? { ...current, meta: { ...current.meta, remote: undefined } }
+        : current);
+      if (selectedTableMatched) {
+        setInfoDraft((draft) => ({ ...draft, updateUrl: "" }));
+        setPublishUpdateTarget("");
+        setRemoteCheckTable(null);
+        setRemoteCheckMessage("");
+        setRemoteCheckOpen(false);
+      }
       setDeleteOnlineOpen(false);
       setOnlineTable(null);
       setSelectedOnlineId("");
       setOnlineLinkPreview(false);
-      await reloadOnlineTables({ page: onlinePage });
+      void reload();
+      void reloadOnlineTables({ page: onlinePage });
     });
   };
 
@@ -1412,9 +1426,6 @@ export default function DictionaryView({
           </p>
           {onlineTable ? <p className="settings-note">{onlineTable.summary.url}</p> : null}
           <div className="dialog-actions conflict-dialog-actions">
-            <button className="secondary-button" onClick={() => setDeleteOnlineOpen(false)}>
-              取消
-            </button>
             <button className="danger-action-button" disabled={busy || !onlineTable} onClick={deleteOnlineSubmission}>
               <Trash2 size={16} />
               删除投稿
@@ -1584,6 +1595,16 @@ function formatLanguageTag(language: string): string {
 function remoteTargetMatches(summary: OnlineDictionarySummary, target: string): boolean {
   const trimmed = target.trim();
   return trimmed === summary.url || trimmed === String(summary.discussionNumber) || trimmed === summary.discussionId;
+}
+
+function localRemoteMatchesOnlineSummary(remote: DictionaryTableRemote, summary: OnlineDictionarySummary): boolean {
+  return normalizeRemoteUrl(remote.url) === normalizeRemoteUrl(summary.url) ||
+    (remote.sourceId === summary.sourceId && remote.discussionId === summary.discussionId) ||
+    (remote.sourceId === summary.sourceId && remote.discussionNumber === summary.discussionNumber);
+}
+
+function normalizeRemoteUrl(value: string): string {
+  return value.trim().replace(/\/+$/, "").toLowerCase();
 }
 
 function buildRemoteDiffs(local: DictionaryTable, remote: OnlineDictionaryTable): string[] {
