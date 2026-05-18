@@ -11,7 +11,7 @@ release/
 
 # Local test projects and downloaded reference source
 TestProject/
-docs/
+docs/internal/
 
 # Codex / agent scratch space
 .codex_tmp/
