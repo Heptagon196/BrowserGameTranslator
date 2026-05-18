@@ -1,6 +1,7 @@
 import React, { Suspense, useCallback, useEffect, useRef, useState, useTransition } from "react";
 import { createRoot } from "react-dom/client";
 import { Toaster, toast } from "sonner";
+import * as RadixCollapsible from "@radix-ui/react-collapsible";
 import * as RadixTooltip from "@radix-ui/react-tooltip";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import {
@@ -20,19 +21,25 @@ import {
   Wrench
 } from "lucide-react";
 import type {
+  AaOfflineDownloadEvent,
+  AaOfflineDownloadResult,
   AnalysisResult,
   AiBalanceSnapshot,
   AppStateSnapshot,
   CreateProjectInput,
   DictionaryTableSummary,
   PackageFormat,
+  PatchProgress,
   PreviewStatus,
   ProofreadOptions,
   ProviderConfig,
-  TextItem
+  TextItem,
+  WebGameDownloadEvent,
+  WebGameDownloadProgress,
+  WebGameDownloadResult
 } from "../shared/types";
 import { FieldRow, PathInput } from "./components/ui/Form";
-import { AppDialog, AppTooltip, CheckboxControl, StyledSelect } from "./components/ui/Primitives";
+import { AppDialog, AppTooltip, CheckboxControl, ProgressBar, StyledSelect } from "./components/ui/Primitives";
 import type { ResourceTableId, TableSettings } from "./components/table/DataTable";
 import {
   defaultUiSettings,
@@ -47,7 +54,7 @@ import {
 } from "./settingsModel";
 import "./styles.css";
 
-type ViewId = "project" | "dictionary" | "import" | "analysis" | "translate" | "proofread" | "prompts" | "tools" | "settings";
+type ViewId = "project" | "dictionary" | "extractionRules" | "import" | "analysis" | "translate" | "proofread" | "prompts" | "tools" | "settings";
 
 type LazyWithPreload<T extends React.ComponentType<any>> = React.LazyExoticComponent<T> & {
   preload: () => Promise<{ default: T }>;
@@ -64,6 +71,7 @@ const AnalysisView = lazyWithPreload(() => import("./views/AnalysisView"));
 const TranslateView = lazyWithPreload(() => import("./views/TranslateView"));
 const ProofreadView = lazyWithPreload(() => import("./views/ProofreadView"));
 const DictionaryView = lazyWithPreload(() => import("./views/DictionaryView"));
+const ExtractionRulesView = lazyWithPreload(() => import("./views/ExtractionRulesView"));
 const PromptsView = lazyWithPreload(() => import("./views/PromptsView"));
 const ToolsView = lazyWithPreload(() => import("./views/ToolsView"));
 const SettingsView = lazyWithPreload(() => import("./views/SettingsView"));
@@ -75,6 +83,7 @@ const defaultProofOptions: ProofreadOptions = {
   languageCheck: true,
   targetLanguageRatio: 0.75,
   characterCheck: true,
+  characterAmbiguityCheck: false,
   glossaryCheck: true,
   untranslatedStatusCheck: true,
   noTranslateCheck: true,
@@ -91,6 +100,7 @@ const viewPreloaders: Partial<Record<ViewId, () => Promise<unknown>>> = {
   translate: TranslateView.preload,
   proofread: ProofreadView.preload,
   dictionary: DictionaryView.preload,
+  extractionRules: ExtractionRulesView.preload,
   prompts: PromptsView.preload,
   tools: ToolsView.preload,
   settings: SettingsView.preload
@@ -129,6 +139,7 @@ function loadProofreadOptions(): ProofreadOptions {
       languageCheck: stored.languageCheck ?? defaultProofOptions.languageCheck,
       targetLanguageRatio: Number.isFinite(targetLanguageRatio) ? Math.min(1, Math.max(0, targetLanguageRatio)) : defaultProofOptions.targetLanguageRatio,
       characterCheck: stored.characterCheck ?? defaultProofOptions.characterCheck,
+      characterAmbiguityCheck: stored.characterAmbiguityCheck ?? defaultProofOptions.characterAmbiguityCheck,
       glossaryCheck: stored.glossaryCheck ?? defaultProofOptions.glossaryCheck,
       untranslatedStatusCheck: stored.untranslatedStatusCheck ?? defaultProofOptions.untranslatedStatusCheck,
       noTranslateCheck: stored.noTranslateCheck ?? defaultProofOptions.noTranslateCheck,
@@ -170,10 +181,12 @@ function App() {
   const [packageAddLauncher, setPackageAddLauncher] = useState(false);
   const [lastPackagePath, setLastPackagePath] = useState("");
   const [previewStatus, setPreviewStatus] = useState<PreviewStatus>({ running: false });
+  const [patchProgress, setPatchProgress] = useState<PatchProgress | null>(null);
   const [aiBalance, setAiBalance] = useState<AiBalanceSnapshot | null>(null);
   const [status, setStatus] = useState("未打开项目");
   const [proofOptions, setProofOptions] = useState(loadProofreadOptions);
   const [searchPaginationEnabled, setSearchPaginationEnabled] = useState(() => localStorage.getItem("bgt.searchPaginationEnabled") === "true");
+  const [autoPatchBeforeOutput, setAutoPatchBeforeOutput] = useState(() => localStorage.getItem("bgt.autoPatchBeforeOutput") !== "false");
   const [tablePageSize, setTablePageSize] = useState(() => normalizeTablePageSize(localStorage.getItem("bgt.tablePageSize")));
   const [uiSettings, setUiSettings] = useState(loadUiSettings);
 
@@ -249,17 +262,25 @@ function App() {
     if (selected) setPackageOutputDirectory(selected);
   };
 
+  const applyPatchBeforeOutputIfNeeded = async () => {
+    const current = snapshotRef.current;
+    if (!autoPatchBeforeOutput || !current.project || !current.textItems.length) return;
+    await window.bgt.applyPatch(current.textItems);
+  };
+
   const startPackage = () => {
     if (!snapshot.project) return;
     void run(
       "打包最终成果",
-      () =>
-        window.bgt.packageProject({
+      async () => {
+        await applyPatchBeforeOutputIfNeeded();
+        return window.bgt.packageProject({
           fileName: packageFileName,
           format: packageFormat,
           addLauncher: packageAddLauncher,
           outputDirectory: packageOutputDirectory
-        }),
+        });
+      },
       (result) => {
         setLastPackagePath(result.archivePath);
         showToast(`打包完成：${formatBytes(result.bytes)}`);
@@ -268,8 +289,14 @@ function App() {
   };
 
   const previewGame = () => {
-    void run("预览游戏", () => window.bgt.previewGame(), (url) => {
-      setPreviewStatus({ running: true, url });
+    void run("预览游戏", async () => {
+      await applyPatchBeforeOutputIfNeeded();
+      const url = await window.bgt.previewGame();
+      const nextSnapshot = await window.bgt.refreshProject();
+      return { url, nextSnapshot };
+    }, (result) => {
+      setSnapshot(result.nextSnapshot);
+      setPreviewStatus({ running: true, url: result.url });
       showToast("网页服务已启动");
     });
   };
@@ -315,6 +342,21 @@ function App() {
   }, [snapshot]);
 
   useEffect(() => {
+    let clearTimer: number | undefined;
+    const unsubscribe = window.bgt.onPatchProgress((progress) => {
+      if (clearTimer) window.clearTimeout(clearTimer);
+      setPatchProgress(progress);
+      if (progress.phase === "done") {
+        clearTimer = window.setTimeout(() => setPatchProgress(null), 900);
+      }
+    });
+    return () => {
+      if (clearTimer) window.clearTimeout(clearTimer);
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
     return window.bgt.onAiCostUpdate(() => {
       void refreshAiBalance(deepSeekBalanceProviderRef.current);
     });
@@ -355,6 +397,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem("bgt.searchPaginationEnabled", String(searchPaginationEnabled));
   }, [searchPaginationEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem("bgt.autoPatchBeforeOutput", String(autoPatchBeforeOutput));
+  }, [autoPatchBeforeOutput]);
 
   useEffect(() => {
     localStorage.setItem("bgt.tablePageSize", String(tablePageSize));
@@ -418,10 +464,21 @@ function App() {
         </div>
       </header>
       <section className={tableViewIds.has(view) ? "content table-content" : "content"}>
-        {view === "project" && <ProjectView busy={busy} snapshot={snapshot} run={run} mergeSnapshot={mergeSnapshot} showToast={showToast} onOpenTools={() => navigateTo("tools")} />}
+        {view === "project" && <ProjectView busy={busy} snapshot={snapshot} run={run} mergeSnapshot={mergeSnapshot} showToast={showToast} />}
         {view === "import" && (
           <Suspense fallback={null}>
-            <ImportExportView busy={busy} items={snapshot.textItems} snapshot={snapshot} provider={activeProvider} tableSettings={tableSettings} run={run} setSnapshot={setSnapshot} saveItems={saveItems} />
+            <ImportExportView
+              busy={busy}
+              items={snapshot.textItems}
+              snapshot={snapshot}
+              provider={activeProvider}
+              tableSettings={tableSettings}
+              autoPatchBeforeOutput={autoPatchBeforeOutput}
+              onAutoPatchBeforeOutputChange={setAutoPatchBeforeOutput}
+              run={run}
+              setSnapshot={setSnapshot}
+              saveItems={saveItems}
+            />
           </Suspense>
         )}
         {view === "analysis" && (
@@ -463,6 +520,11 @@ function App() {
             <DictionaryView busy={busy} snapshot={snapshot} tableSettings={tableSettings} run={run} showToast={showToast} />
           </Suspense>
         )}
+        {view === "extractionRules" && (
+          <Suspense fallback={null}>
+            <ExtractionRulesView busy={busy} snapshot={snapshot} run={run} showToast={showToast} />
+          </Suspense>
+        )}
         {view === "prompts" && (
           <Suspense fallback={null}>
             <PromptsView snapshot={snapshot} run={run} />
@@ -484,6 +546,8 @@ function App() {
               setTablePageSize={setTablePageSize}
               searchPaginationEnabled={searchPaginationEnabled}
               setSearchPaginationEnabled={setSearchPaginationEnabled}
+              autoPatchBeforeOutput={autoPatchBeforeOutput}
+              setAutoPatchBeforeOutput={setAutoPatchBeforeOutput}
               uiSettings={uiSettings}
               setUiSettings={setUiSettings}
             />
@@ -538,7 +602,7 @@ function App() {
             <Languages size={24} />
             <div>
               <strong>BrowserGameTranslator</strong>
-              <span>Offline game AI translation</span>
+              <span>Browser game localization</span>
             </div>
           </div>
           <NavButton active={["project", "import", "analysis", "translate", "proofread"].includes(view)} icon={<FolderOpen size={18} />} label="项目" onClick={() => navigateTo("project")} onPreload={() => preloadView("project")} />
@@ -551,6 +615,7 @@ function App() {
             </div>
           ) : null}
           <NavButton active={view === "dictionary"} icon={<BookOpen size={18} />} label="词典" onClick={() => navigateTo("dictionary")} onPreload={() => preloadView("dictionary")} />
+          <NavButton active={view === "extractionRules"} icon={<FileSearch size={18} />} label="提取规则" onClick={() => navigateTo("extractionRules")} onPreload={() => preloadView("extractionRules")} />
           <NavButton active={view === "prompts"} icon={<MessageSquare size={18} />} label="提示词" onClick={() => navigateTo("prompts")} onPreload={() => preloadView("prompts")} />
           <NavButton active={view === "tools"} icon={<Wrench size={18} />} label="工具" onClick={() => navigateTo("tools")} onPreload={() => preloadView("tools")} />
           <NavButton active={view === "settings"} icon={<Settings size={18} />} label="设置" onClick={() => navigateTo("settings")} onPreload={() => preloadView("settings")} />
@@ -623,10 +688,77 @@ function App() {
             onStart={startPackage}
           />
         )}
+        {patchProgress && <PatchProgressDialog progress={patchProgress} />}
         <Toaster position="top-center" richColors duration={2600} />
       </div>
     </RadixTooltip.Provider>
   );
+}
+
+function PatchProgressDialog({ progress }: { progress: PatchProgress }) {
+  const detail = [
+    progress.message,
+    progress.currentFile,
+    progress.total ? `${Math.min(Math.floor(progress.current), progress.total)}/${progress.total}` : "",
+    typeof progress.replacements === "number" ? `${progress.replacements} 处替换` : "",
+    typeof progress.blocked === "number" && progress.blocked > 0 ? `${progress.blocked} 项跳过` : ""
+  ].filter(Boolean).join(" · ");
+
+  return (
+    <AppDialog open title="回填游戏" description={detail} className="progress-modal" disableOutsideClose>
+      <div className="progress-row">
+        <span>进度</span>
+        <ProgressBar value={progress.percent} className={progress.phase === "done" ? "progress-track" : "progress-track active"} />
+        <strong>{Math.round(progress.percent)}%</strong>
+      </div>
+      <div className="progress-summary">
+        <span>{progress.phase === "done" ? "已完成" : "处理中"}</span>
+      </div>
+    </AppDialog>
+  );
+}
+
+type ProjectDownloadProviderId = "web" | "aaonline";
+
+interface ProjectDownloadProviderConfig {
+  id: ProjectDownloadProviderId;
+  label: string;
+  description: string;
+  outputLabel: string;
+  outputDescription: string;
+  buttonLabel: string;
+  match: (value: string) => boolean;
+}
+
+const projectDownloadProviders: ProjectDownloadProviderConfig[] = [
+  {
+    id: "aaonline",
+    label: "AAOnline",
+    description: "匹配 AAOnline player.php 案件地址或 trial ID，使用内置 aaoffline 下载器。",
+    outputLabel: "输出目录",
+    outputDescription: "AAOnline 下载器要求选择一个已经存在且为空的文件夹。下载成功后会直接用该目录创建项目。",
+    buttonLabel: "下载 AAOnline 游戏并创建项目",
+    match: (value) => /^(\d+|https:\/\/aaonline\.fr\/player\.php\?trial_id=\d+)/i.test(value.trim())
+  },
+  {
+    id: "web",
+    label: "通用网页游戏",
+    description: "匹配普通 HTTP/HTTPS 网页游戏地址，并自动解析常见内嵌 HTML5 游戏页面。",
+    outputLabel: "保存目录",
+    outputDescription: "请选择一个已经存在且为空的文件夹。下载器会直接把网页资源保存到该目录，并用该目录创建项目。",
+    buttonLabel: "下载网页游戏并创建项目",
+    match: (value) => /^https?:\/\/[^/]+/i.test(value.trim())
+  }
+];
+
+function matchProjectDownloadProvider(value: string): ProjectDownloadProviderConfig | undefined {
+  return projectDownloadProviders.find((provider) => provider.match(value));
+}
+
+interface FailedDownloadCreateConfirmation {
+  projectRoot: string;
+  message: string;
+  failures: string[];
 }
 
 function ProjectView({
@@ -634,18 +766,34 @@ function ProjectView({
   snapshot,
   run,
   mergeSnapshot,
-  showToast,
-  onOpenTools
+  showToast
 }: {
   busy: boolean;
   snapshot: AppStateSnapshot;
   run: <T>(message: string, task: () => Promise<T>, onDone?: (value: T) => void) => Promise<T | undefined>;
   mergeSnapshot: (snapshot?: AppStateSnapshot | null) => void;
   showToast: (message: string, tone?: "success" | "error") => void;
-  onOpenTools: () => void;
 }) {
   const [createInput, setCreateInput] = useState<CreateProjectInput | null>(null);
   const [createErrors, setCreateErrors] = useState<string[]>([]);
+  const [downloadModalOpen, setDownloadModalOpen] = useState(false);
+  const [downloadUrl, setDownloadUrl] = useState("");
+  const [downloadOutputDirectory, setDownloadOutputDirectory] = useState("");
+  const [webOutputErrors, setWebOutputErrors] = useState<string[]>([]);
+  const [webRuntimeCaptureSeconds, setWebRuntimeCaptureSeconds] = useState(9);
+  const [webDownloadLogs, setWebDownloadLogs] = useState<WebGameDownloadEvent[]>([]);
+  const [webDownloadProgress, setWebDownloadProgress] = useState<WebGameDownloadProgress | null>(null);
+  const [downloadedProjectRoot, setDownloadedProjectRoot] = useState("");
+  const [downloadResultWarning, setDownloadResultWarning] = useState("");
+  const [failedDownloadDetails, setFailedDownloadDetails] = useState<FailedDownloadCreateConfirmation | null>(null);
+  const [failedDownloadConfirmationOpen, setFailedDownloadConfirmationOpen] = useState(false);
+  const [aaDownloadLogs, setAaDownloadLogs] = useState<AaOfflineDownloadEvent[]>([]);
+  const [aaOutputErrors, setAaOutputErrors] = useState<string[]>([]);
+  const [aaPlayerVersion, setAaPlayerVersion] = useState("master");
+  const [aaConcurrentDownloads, setAaConcurrentDownloads] = useState(5);
+  const [aaContinueOnAssetError, setAaContinueOnAssetError] = useState(false);
+  const [aaWithUserscripts, setAaWithUserscripts] = useState<"none" | "all" | "backlog" | "better-layout" | "keyboard-controls" | "alt-nametag">("all");
+  const matchedDownloadProvider = matchProjectDownloadProvider(downloadUrl);
 
   useEffect(() => {
     if (!createInput) return;
@@ -658,6 +806,48 @@ function ProjectView({
       cancelled = true;
     };
   }, [createInput]);
+
+  useEffect(() => {
+    return window.bgt.onWebGameDownloadLog((event) => setWebDownloadLogs((logs) => [...logs, event]));
+  }, []);
+
+  useEffect(() => {
+    return window.bgt.onWebGameDownloadProgress(setWebDownloadProgress);
+  }, []);
+
+  useEffect(() => {
+    return window.bgt.onAaOfflineDownloadLog((event) => setAaDownloadLogs((logs) => [...logs, event]));
+  }, []);
+
+  useEffect(() => {
+    if (matchedDownloadProvider?.id !== "aaonline") {
+      setAaOutputErrors([]);
+      return;
+    }
+    let cancelled = false;
+    setAaOutputErrors(["正在检查输出目录..."]);
+    void window.bgt.validateAaOfflineOutputDirectory(downloadOutputDirectory).then((errors) => {
+      if (!cancelled) setAaOutputErrors(errors);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [downloadOutputDirectory, matchedDownloadProvider?.id]);
+
+  useEffect(() => {
+    if (matchedDownloadProvider?.id !== "web") {
+      setWebOutputErrors([]);
+      return;
+    }
+    let cancelled = false;
+    setWebOutputErrors(["正在检查保存目录..."]);
+    void window.bgt.validateWebGameOutputDirectory(downloadOutputDirectory).then((errors) => {
+      if (!cancelled) setWebOutputErrors(errors);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [downloadOutputDirectory, matchedDownloadProvider?.id]);
 
   const openOrCreateProject = async () => {
     const directory = await window.bgt.selectDirectory();
@@ -677,11 +867,107 @@ function ProjectView({
     });
   };
 
+  const chooseDownloadOutputDirectory = async () => {
+    const selected = await window.bgt.selectDirectory();
+    if (selected) setDownloadOutputDirectory(selected);
+  };
+
   const chooseProjectRoot = async () => {
     const selected = await window.bgt.selectDirectory();
     if (!selected || !createInput) return;
     setCreateInput({ ...createInput, projectName: basename(selected), projectRoot: selected });
   };
+
+  const openDownloadAndCreateDialog = () => {
+    setWebDownloadLogs([]);
+    setAaDownloadLogs([]);
+    setWebDownloadProgress(null);
+    setDownloadedProjectRoot("");
+    setDownloadResultWarning("");
+    setFailedDownloadDetails(null);
+    setFailedDownloadConfirmationOpen(false);
+    setDownloadModalOpen(true);
+  };
+
+  const continueToCreateProject = (projectRoot: string) => {
+    setFailedDownloadDetails(null);
+    setFailedDownloadConfirmationOpen(false);
+    setDownloadModalOpen(false);
+    setCreateInput({
+      projectName: basename(projectRoot),
+      projectRoot,
+      sourceLanguage: "en",
+      targetLanguage: "zh-CN"
+    });
+    showToast("下载完成，请确认项目信息");
+  };
+
+  const startDownloadAndCreate = () => {
+    if (!matchedDownloadProvider) return;
+    setWebDownloadLogs([]);
+    setAaDownloadLogs([]);
+    setWebDownloadProgress(null);
+    setDownloadedProjectRoot("");
+    setDownloadResultWarning("");
+    setFailedDownloadDetails(null);
+    setFailedDownloadConfirmationOpen(false);
+    if (matchedDownloadProvider.id === "aaonline") {
+      void run(
+        "下载 AAOnline 游戏",
+        async () => {
+          const result: AaOfflineDownloadResult = await window.bgt.downloadAaOnlineGame({
+            caseUrlOrId: downloadUrl,
+            outputPath: downloadOutputDirectory,
+            playerVersion: aaPlayerVersion,
+            concurrentDownloads: aaConcurrentDownloads,
+            continueOnAssetError: aaContinueOnAssetError,
+            withUserscripts: aaWithUserscripts
+          });
+          if (!result.status) throw new Error(result.message);
+          return result.outputPath;
+        },
+        continueToCreateProject
+      );
+      return;
+    }
+    void run(
+      "下载网页游戏",
+      async () => {
+        const result: WebGameDownloadResult = await window.bgt.downloadWebGame({
+          url: downloadUrl,
+          outputDirectory: downloadOutputDirectory,
+          runtimeCaptureSeconds: webRuntimeCaptureSeconds
+        });
+        if (!result.filePath) throw new Error("下载完成但没有返回入口文件。");
+        const projectRoot = dirname(result.filePath);
+        if (!result.status || result.failures?.length) {
+          const failures = result.failures ?? [];
+          const warning = failures.length ? `下载存在 ${failures.length} 个失败资源。` : result.message;
+          setDownloadedProjectRoot(projectRoot);
+          setDownloadResultWarning(warning);
+          setFailedDownloadDetails({
+            projectRoot,
+            message: result.message || warning,
+            failures
+          });
+          setFailedDownloadConfirmationOpen(true);
+          return "";
+        }
+        return projectRoot;
+      },
+      (projectRoot) => {
+        if (projectRoot) continueToCreateProject(projectRoot);
+      }
+    );
+  };
+
+  const downloadDisabled =
+    busy ||
+    !matchedDownloadProvider ||
+    !downloadOutputDirectory.trim() ||
+    (matchedDownloadProvider.id === "aaonline" && aaOutputErrors.length > 0) ||
+    (matchedDownloadProvider.id === "web" && webOutputErrors.length > 0);
+  const activeDownloadLogs = matchedDownloadProvider?.id === "aaonline" ? aaDownloadLogs : webDownloadLogs;
 
   return (
     <div className="stack">
@@ -691,10 +977,10 @@ function ProjectView({
           <span>打开或创建项目</span>
           <small>选择一个游戏目录；已包含 `.bgt` 时直接打开，否则创建新项目</small>
         </button>
-        <button className="project-action" disabled={busy} onClick={onOpenTools}>
+        <button className="project-action" disabled={busy} onClick={openDownloadAndCreateDialog}>
           <Download size={28} />
-          <span>下载游戏</span>
-          <small>跳转到工具页，下载 itch.io HTML5 游戏或 AAOnline 游戏</small>
+          <span>下载游戏并创建项目</span>
+          <small>输入下载网址，自动匹配下载器；下载完成后进入创建项目流程</small>
         </button>
       </div>
       {snapshot.project && <MetricGrid snapshot={snapshot} />}
@@ -773,6 +1059,167 @@ function ProjectView({
             >
               <Save size={16} />
               创建
+            </button>
+          </div>
+        </AppDialog>
+      )}
+      <AppDialog
+        open={downloadModalOpen}
+        title="下载游戏并创建项目"
+        description="输入下载网址后，程序会按配置匹配对应下载器。下载完成且没有失败资源时，会继续进入创建项目流程。"
+        onOpenChange={setDownloadModalOpen}
+      >
+        <div className="settings-form">
+          <FieldRow label="下载网址" description="填写要下载的网页游戏地址；程序会自动匹配可用下载器。">
+            <input value={downloadUrl} onChange={(event) => setDownloadUrl(event.target.value)} placeholder="https://example.com/game" />
+          </FieldRow>
+          <FieldRow label="匹配下载器" description={matchedDownloadProvider?.description ?? "请输入网址后自动匹配。后续新增网站适配时只需要增加下载器配置。"}>
+            <input value={matchedDownloadProvider?.label ?? "未匹配"} readOnly />
+          </FieldRow>
+          <FieldRow label={matchedDownloadProvider?.outputLabel ?? "保存目录"} description={matchedDownloadProvider?.outputDescription ?? "选择下载输出目录。"}>
+            <PathInput value={downloadOutputDirectory} onPick={chooseDownloadOutputDirectory} onChange={setDownloadOutputDirectory} />
+          </FieldRow>
+          {matchedDownloadProvider?.id === "web" && (
+            <RadixCollapsible.Root className="collapsible-panel">
+              <RadixCollapsible.Trigger className="collapsible-trigger">高级选项</RadixCollapsible.Trigger>
+              <RadixCollapsible.Content>
+                <div className="settings-form nested-settings">
+                  <FieldRow label="运行时捕获秒数" description="下载静态资源后，打开页面并监听启动阶段的网络请求。设为 0 可关闭运行时捕获。">
+                    <input
+                      min={0}
+                      max={60}
+                      type="number"
+                      value={webRuntimeCaptureSeconds}
+                      onChange={(event) => setWebRuntimeCaptureSeconds(Math.max(0, Math.min(60, Number(event.target.value) || 0)))}
+                    />
+                  </FieldRow>
+                </div>
+              </RadixCollapsible.Content>
+            </RadixCollapsible.Root>
+          )}
+          {matchedDownloadProvider?.id === "aaonline" && (
+            <RadixCollapsible.Root className="collapsible-panel">
+              <RadixCollapsible.Trigger className="collapsible-trigger">高级选项</RadixCollapsible.Trigger>
+              <RadixCollapsible.Content>
+                <div className="settings-form nested-settings">
+                  <FieldRow label="播放器版本" description="aaoffline 使用的 AAOnline 播放器分支或提交名。默认 master。">
+                    <input value={aaPlayerVersion} onChange={(event) => setAaPlayerVersion(event.target.value)} />
+                  </FieldRow>
+                  <FieldRow label="并发下载数" description="同时下载资源的数量。网络不稳定时可以调低。">
+                    <input
+                      min={1}
+                      max={32}
+                      type="number"
+                      value={aaConcurrentDownloads}
+                      onChange={(event) => setAaConcurrentDownloads(Math.max(1, Math.min(32, Number(event.target.value) || 1)))}
+                    />
+                  </FieldRow>
+                  <FieldRow label="用户脚本" description="可让 aaoffline 对下载后的案件应用额外脚本。默认应用全部脚本。">
+                    <StyledSelect
+                      value={aaWithUserscripts}
+                      options={[
+                        { value: "all", label: "全部" },
+                        { value: "none", label: "不应用" },
+                        { value: "backlog", label: "回看记录" },
+                        { value: "better-layout", label: "改进布局" },
+                        { value: "keyboard-controls", label: "键盘控制" },
+                        { value: "alt-nametag", label: "像素姓名牌字体" }
+                      ]}
+                      onChange={(value) => setAaWithUserscripts(value as typeof aaWithUserscripts)}
+                    />
+                  </FieldRow>
+                  <label className="checkbox-row">
+                    <CheckboxControl checked={aaContinueOnAssetError} onChange={setAaContinueOnAssetError} />
+                    资源下载失败时继续
+                  </label>
+                </div>
+              </RadixCollapsible.Content>
+            </RadixCollapsible.Root>
+          )}
+          {matchedDownloadProvider?.id === "aaonline" && aaOutputErrors.length > 0 && (
+            <div className="error-list">
+              {aaOutputErrors.map((error) => (
+                <div key={error}>{error}</div>
+              ))}
+            </div>
+          )}
+          {matchedDownloadProvider?.id === "web" && webOutputErrors.length > 0 && (
+            <div className="error-list">
+              {webOutputErrors.map((error) => (
+                <div key={error}>{error}</div>
+              ))}
+            </div>
+          )}
+          <div className="button-row">
+            <button disabled={downloadDisabled} onClick={startDownloadAndCreate}>
+              <Download size={16} />
+              {matchedDownloadProvider?.buttonLabel ?? "下载游戏并创建项目"}
+            </button>
+          </div>
+        </div>
+        {(webDownloadProgress || activeDownloadLogs.length > 0) && (
+          <div className="tool-result">
+            <h2>下载状态</h2>
+            {webDownloadProgress && matchedDownloadProvider?.id === "web" && (
+              <p>
+                {webDownloadProgress.message ?? "下载中"}：{webDownloadProgress.completed}/{webDownloadProgress.total}
+              </p>
+            )}
+            {activeDownloadLogs.length > 0 && (
+              <pre className="tool-log">
+                {activeDownloadLogs
+                  .map((entry) => `[${entry.stream}] ${entry.text.trimEnd()}`)
+                  .filter(Boolean)
+                  .join("\n")}
+              </pre>
+            )}
+            {downloadedProjectRoot && (
+              <div className="download-warning-panel">
+                <div>
+                  <strong>{downloadResultWarning || "下载存在失败资源。"}</strong>
+                  <span>请先确认失败资源，再决定是否继续创建项目。</span>
+                </div>
+                <button className="secondary-button" onClick={() => setFailedDownloadConfirmationOpen(true)}>
+                  查看失败资源
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </AppDialog>
+      {failedDownloadDetails && failedDownloadConfirmationOpen && (
+        <AppDialog
+          open
+          title="资源下载失败"
+          description="以下资源没有下载成功。继续创建项目后，游戏可能缺少图片、音频、脚本或样式文件。"
+          compact
+          className="download-failure-dialog"
+          onOpenChange={(open) => {
+            if (!open) setFailedDownloadConfirmationOpen(false);
+          }}
+        >
+          <div className="download-failure-summary">
+            <strong>{failedDownloadDetails.message}</strong>
+            <span>项目目录：{failedDownloadDetails.projectRoot}</span>
+          </div>
+          {failedDownloadDetails.failures.length > 0 ? (
+            <div className="download-failure-list" role="list">
+              {failedDownloadDetails.failures.map((failure, index) => (
+                <div key={`${failure}-${index}`} role="listitem">
+                  {failure}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="empty">下载器没有返回具体失败资源路径，请查看下载状态日志。</p>
+          )}
+          <div className="button-row modal-actions">
+            <button className="secondary-button" onClick={() => setFailedDownloadConfirmationOpen(false)}>
+              取消创建
+            </button>
+            <button onClick={() => continueToCreateProject(failedDownloadDetails.projectRoot)}>
+              <Save size={16} />
+              仍然创建项目
             </button>
           </div>
         </AppDialog>
@@ -939,6 +1386,14 @@ function basename(value: string): string {
   return normalized.split("/").pop() || normalized;
 }
 
+function dirname(value: string): string {
+  const normalized = normalizePathSeparators(value).replace(/\/+$/, "");
+  const index = normalized.lastIndexOf("/");
+  if (index <= 0) return normalized;
+  const directory = normalized.slice(0, index);
+  return value.includes("\\") ? directory.replaceAll("/", "\\") : directory;
+}
+
 function joinPath(root: string, child: string): string {
   const separator = root.includes("\\") ? "\\" : "/";
   return `${root.replace(/[\\/]+$/, "")}${separator}${child}`;
@@ -964,6 +1419,7 @@ function viewTitle(view: ViewId): string {
     translate: "翻译",
     proofread: "校对",
     dictionary: "词典",
+    extractionRules: "提取规则",
     prompts: "提示词",
     tools: "工具",
     settings: "设置"

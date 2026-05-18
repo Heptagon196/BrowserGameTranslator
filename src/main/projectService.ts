@@ -3,6 +3,7 @@ import path from "node:path";
 import { app, dialog } from "electron";
 import { AnalysisResult, CreateProjectInput, ProjectConfig, PromptConfig, PromptScope, ProviderConfig, TextItem } from "../shared/types";
 import {
+  compactTextItems,
   emptyAnalysis,
   ensureProjectDirs,
   loadSnapshot,
@@ -16,6 +17,7 @@ import {
 import { loadActiveChatProviderId, loadActiveProviderId, loadProviders, saveActiveChatProviderId, saveActiveProviderId, saveProviders } from "./credentialService";
 import { loadDefaultPrompts, loadEffectivePrompts, loadPrompts, savePrompts } from "./promptService";
 import { loadRecentProjects, recordRecentProject } from "./recentProjects";
+import { findAvailablePreviewPort, normalizePreviewPort } from "./portUtils";
 
 export class ProjectService {
   private currentProject: ProjectConfig | null = null;
@@ -43,6 +45,7 @@ export class ProjectService {
       projectName: input.projectName.trim(),
       projectRoot,
       homePage: "index.html",
+      previewPort: undefined,
       sourceLanguage: input.sourceLanguage || "auto",
       targetLanguage: input.targetLanguage || "zh-CN",
       scanProfile: "web-game-default",
@@ -125,6 +128,17 @@ export class ProjectService {
     return this.loadSnapshot(sanitizedProject);
   }
 
+  async ensurePreviewPort(): Promise<ProjectConfig> {
+    const current = this.project;
+    const existingPort = normalizePreviewPort(current.previewPort);
+    if (existingPort) return current;
+    const previewPort = await findAvailablePreviewPort();
+    const nextProject = this.sanitizeProject({ ...current, previewPort });
+    this.currentProject = nextProject;
+    await this.writeProjectConfig(nextProject);
+    return nextProject;
+  }
+
   async saveProviders(providers: ProviderConfig[]) {
     return saveProviders(providers);
   }
@@ -166,8 +180,9 @@ export class ProjectService {
   }
 
   async saveTextItems(items: TextItem[]) {
-    await writeJsonl(projectPaths(this.project).textItems, items);
-    return items;
+    const compacted = compactTextItems(items);
+    await writeJsonl(projectPaths(this.project).textItems, compacted);
+    return compacted;
   }
 
   async saveAnalysis(analysis: AnalysisResult) {
@@ -180,7 +195,7 @@ export class ProjectService {
   }
 
   async readTextItems() {
-    return readJsonl<TextItem>(projectPaths(this.project).textItems);
+    return compactTextItems(await readJsonl<TextItem>(projectPaths(this.project).textItems));
   }
 
   private async loadSnapshot(project: ProjectConfig) {
@@ -205,6 +220,7 @@ export class ProjectService {
       projectName: project.projectName,
       projectRoot,
       homePage: project.homePage || "index.html",
+      previewPort: normalizePreviewPort(project.previewPort),
       sourceLanguage: project.sourceLanguage,
       targetLanguage: project.targetLanguage,
       scanProfile: project.scanProfile,

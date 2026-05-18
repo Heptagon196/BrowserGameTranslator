@@ -3,6 +3,7 @@
 @import "./styles/source-viewer.css";
 @import "./styles/table-resources.css";
 @import "./styles/dictionary.css";
+@import "./styles/extraction-rules.css";
 @import "./styles/forms-settings-prompts.css";
 @import "./styles/ai-chat.css";
 @import "./styles/responsive.css";

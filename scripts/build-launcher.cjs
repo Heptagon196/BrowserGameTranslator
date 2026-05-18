@@ -29,6 +29,7 @@ run("gcc", [
   path.join(root, "tools", "launcher", "main.c"),
   resourceObject,
   "-lws2_32",
+  "-liphlpapi",
   "-lshell32"
 ]);
 

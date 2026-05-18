@@ -397,7 +397,7 @@ export default function DictionaryView({
     )
   });
   const publishSource = onlineSources.find((source) => source.id === publishDraft.sourceId);
-  const publishPageUrl = publishUpdateTarget.trim() || (publishSource ? `${publishSource.url.replace(/\/+$/, "")}/discussions/categories/${encodeURIComponent(publishSource.category)}` : "");
+  const publishPageUrl = publishUpdateTarget.trim() || (publishSource ? `${publishSource.url.replace(/\/+$/, "")}/discussions/categories/${encodeURIComponent(publishSource.dictionaryCategory)}` : "");
 
   const tableWithPublishInfo = (baseTable: DictionaryTable): DictionaryTable => {
     const updateUrl = publishUpdateTarget.trim();

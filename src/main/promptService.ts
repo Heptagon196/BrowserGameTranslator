@@ -9,7 +9,7 @@ export const defaultPrompts = (): PromptConfig => ({
     [
       "你是一名专业的游戏本地化分析员，你的任务是从网页游戏文本中提取翻译时需要统一处理的资源。",
       "请提取人物名、专有名词/术语、以及必须原样保留的特殊标记符、占位符、控制代码、变量、HTML 标签和代码片段。",
-      "人物名需要尽量拆分姓氏、名字、昵称关系；术语需要给出推荐译名、类型和说明；禁翻项需要说明为什么必须保留。",
+      "人物名需要尽量拆分姓氏、名字、昵称关系；如果完整姓名、姓或名容易和普通词、月份、动词等非人名含义混淆，请在 ambiguity.source、ambiguity.familyName、ambiguity.givenName 中分别标记 true，并在备注说明歧义点。",
       "不要编造文本中不存在的项目。只输出合法 JSON，不要使用 Markdown。",
       "输入数据会包含 schema、extractionRules 和 items，请按 schema 返回 characters、glossary、noTranslate。"
     ].join("\n"),
@@ -25,6 +25,15 @@ export const defaultPrompts = (): PromptConfig => ({
       "excludeFiles 支持相对路径或简单 * 通配符，放需要明确排除的引擎/库/缓存/导出文件。",
       "不要包含 .bgt、node_modules、bgt-scan-report.json、bgt-extracted-text-items.jsonl。",
       "返回结构：{ schemaVersion:1, engine:string, summary:string, includeFiles:string[], excludeFiles:string[], extractionNotes:string[], backfillNotes:string[], risks:string[] }"
+    ].join("\n"),
+  aiExtractionRuleReviewSystem:
+    [
+      "你是 BrowserGameTranslator 的提取规则评审助手。",
+      "你的任务是判断每个规则组是否应进入可翻译文本表。用户确认对象是规则组，不是单条文本。",
+      "只输出合法 JSON，不要输出 Markdown 或解释段落。",
+      "判断标准：玩家可见自然语言、剧情对白、菜单 UI、按钮、提示、说明应建议 include；资源路径、代码标识、CSS/DOM 属性、调试错误、引擎内部字段应建议 exclude；混合或回填风险建议 review。",
+      "不要假定内置规则或程序分组一定正确。发现混杂时在 suggestedSplitRules 中说明。",
+      "返回结构：{ \"schemaVersion\":1, \"groups\":[{\"id\":\"grp_0001\",\"recommendation\":\"include|exclude|review\",\"confidence\":0.0,\"reason\":\"...\",\"suggestedLabel\":\"可选\",\"suggestedRisks\":[],\"suggestedNoTranslatePatterns\":[],\"suggestedSplitRules\":[]}] }"
     ].join("\n"),
   translationSystem:
     [
@@ -101,6 +110,7 @@ function mergePrompts(prompts: Partial<PromptConfig>): PromptConfig {
     connectionTestSystem: stringPrompt(prompts.connectionTestSystem, defaults.connectionTestSystem),
     analysisSystem: stringPrompt(prompts.analysisSystem, defaults.analysisSystem),
     aiLocalizationPlanSystem: stringPrompt(prompts.aiLocalizationPlanSystem, defaults.aiLocalizationPlanSystem),
+    aiExtractionRuleReviewSystem: stringPrompt(prompts.aiExtractionRuleReviewSystem, defaults.aiExtractionRuleReviewSystem),
     translationSystem: stringPrompt(prompts.translationSystem, defaults.translationSystem),
     proofreadSystem: stringPrompt(prompts.proofreadSystem, defaults.proofreadSystem),
     translationRules: Array.isArray(prompts.translationRules) ? prompts.translationRules.map(String) : []

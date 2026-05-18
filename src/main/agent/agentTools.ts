@@ -6,6 +6,7 @@ import {
   AnalysisResult,
   AiPermissionMode,
   CharacterEntry,
+  CharacterNameAmbiguity,
   GlossaryEntry,
   NoTranslateEntry,
   TextItem,
@@ -1050,6 +1051,7 @@ function makeAnalysisRow(table: AnalysisTable, input: Record<string, unknown>, i
       givenName: optionalString(input.givenName),
       givenNameTranslation: optionalString(input.givenNameTranslation),
       nicknameOf: optionalString(input.nicknameOf),
+      ambiguity: normalizeCharacterAmbiguity(input.ambiguity),
       note: stringArg(input.note),
       enabled: booleanArg(input.enabled, true),
     };
@@ -1097,7 +1099,7 @@ function tableFields(table: AgentTable, mode: TableWriteMode): string[] {
     return mode === "add" ? ["id", ...fields] : fields;
   }
   if (table === "characters") {
-    const fields = ["source", "target", "familyName", "familyNameTranslation", "givenName", "givenNameTranslation", "nicknameOf", "note", "enabled"];
+    const fields = ["source", "target", "familyName", "familyNameTranslation", "givenName", "givenNameTranslation", "nicknameOf", "ambiguity", "note", "enabled"];
     return mode === "add" ? ["id", ...fields] : fields;
   }
   if (table === "glossary") {
@@ -1220,7 +1222,7 @@ function defaultAnalysisReplaceFields(table: AnalysisTable): string[] {
 }
 
 function analysisReplaceableFields(table: AnalysisTable): string[] {
-  if (table === "characters") return ["source", "target", "familyName", "familyNameTranslation", "givenName", "givenNameTranslation", "nicknameOf", "note"];
+  if (table === "characters") return ["source", "target", "familyName", "familyNameTranslation", "givenName", "givenNameTranslation", "nicknameOf", "ambiguity", "note"];
   if (table === "glossary") return ["source", "target", "note", "category"];
   return ["marker", "note"];
 }
@@ -1402,6 +1404,16 @@ function numberArg(value: unknown, fallback: number): number {
 
 function booleanArg(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
+}
+
+function normalizeCharacterAmbiguity(value: unknown): CharacterNameAmbiguity | undefined {
+  if (!isRecord(value)) return undefined;
+  const ambiguity: CharacterNameAmbiguity = {
+    source: value.source === true,
+    familyName: value.familyName === true,
+    givenName: value.givenName === true
+  };
+  return ambiguity.source || ambiguity.familyName || ambiguity.givenName ? ambiguity : undefined;
 }
 
 function stringArrayArg(value: unknown): string[] {

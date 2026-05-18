@@ -2,6 +2,7 @@
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
 #include <windows.h>
 #include <shellapi.h>
 
@@ -14,6 +15,15 @@
 #define BUFFER_SIZE 8192
 #define MAX_HOME_PAGE 512
 #define MAX_URL 1024
+#define MIN_USER_PORT 1
+#define MIN_RANDOM_PREVIEW_PORT 10001
+#define MAX_PREVIEW_PORT 65535
+
+typedef struct LauncherConfig {
+  char homePage[MAX_HOME_PAGE];
+  unsigned short port;
+  int hasPort;
+} LauncherConfig;
 
 typedef struct ClientContext {
   SOCKET socket;
@@ -24,8 +34,13 @@ typedef struct ClientContext {
 static volatile LONG g_stopRequested = 0;
 
 static void fail_and_wait(const char *message);
-static int read_home_page(const char *root, char *homePage, size_t homePageSize);
+static int read_launcher_config(const char *root, LauncherConfig *config);
+static int write_launcher_config(const char *root, const LauncherConfig *config);
 static void normalize_home_page(char *value);
+static SOCKET create_listening_server(unsigned short configuredPort, int hasConfiguredPort, unsigned short *actualPort, char *errorMessage, size_t errorMessageSize);
+static int bind_and_listen(SOCKET server, unsigned short port, unsigned short *actualPort);
+static unsigned short random_preview_port(void);
+static void describe_port_owner(unsigned short port, char *out, size_t outSize);
 static int build_safe_path(const char *root, const char *relative, char *outPath, size_t outPathSize);
 static unsigned __stdcall input_thread(void *arg);
 static unsigned __stdcall client_thread(void *arg);
@@ -45,13 +60,13 @@ static void wait_for_enter(void);
 int main(void) {
   WSADATA wsa;
   SOCKET server;
-  struct sockaddr_in address;
-  int addressLength = sizeof(address);
   char exePath[MAX_PATH];
   char root[MAX_PATH];
-  char homePage[MAX_HOME_PAGE] = "index.html";
   char homePath[MAX_PATH];
   char url[MAX_URL];
+  char bindError[1024];
+  unsigned short actualPort = 0;
+  LauncherConfig config;
 
   SetConsoleOutputCP(CP_UTF8);
   SetConsoleCP(CP_UTF8);
@@ -64,8 +79,8 @@ int main(void) {
   root[sizeof(root) - 1] = '\0';
   dirname_in_place(root);
 
-  read_home_page(root, homePage, sizeof(homePage));
-  if (!build_safe_path(root, homePage, homePath, sizeof(homePath))) {
+  read_launcher_config(root, &config);
+  if (!build_safe_path(root, config.homePage, homePath, sizeof(homePath))) {
     fail_and_wait("首页路径不能指向游戏目录外。");
     return 1;
   }
@@ -79,28 +94,23 @@ int main(void) {
     return 1;
   }
 
-  server = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  srand((unsigned int)(GetTickCount() ^ GetCurrentProcessId()));
+  server = create_listening_server(config.port, config.hasPort, &actualPort, bindError, sizeof(bindError));
   if (server == INVALID_SOCKET) {
     WSACleanup();
-    fail_and_wait("无法创建本地服务器。");
+    fail_and_wait(bindError[0] ? bindError : "无法创建本地服务器。");
     return 1;
   }
 
-  memset(&address, 0, sizeof(address));
-  address.sin_family = AF_INET;
-  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  address.sin_port = htons(0);
-
-  if (bind(server, (struct sockaddr *)&address, sizeof(address)) == SOCKET_ERROR ||
-      listen(server, SOMAXCONN) == SOCKET_ERROR ||
-      getsockname(server, (struct sockaddr *)&address, &addressLength) == SOCKET_ERROR) {
-    closesocket(server);
-    WSACleanup();
-    fail_and_wait("无法启动本地服务器。");
-    return 1;
+  if (!config.hasPort) {
+    config.port = actualPort;
+    config.hasPort = 1;
+    if (!write_launcher_config(root, &config)) {
+      printf("警告：无法写入 BGT-Launcher.json，端口下次可能重新分配。\n");
+    }
   }
 
-  snprintf(url, sizeof(url), "http://127.0.0.1:%u/%s", ntohs(address.sin_port), homePage);
+  snprintf(url, sizeof(url), "http://127.0.0.1:%u/%s", actualPort, config.homePage);
   backslash_to_slash(url);
 
   printf("本地服务器已启动。\n");
@@ -133,12 +143,12 @@ int main(void) {
     }
     context->socket = client;
     strncpy(context->root, root, sizeof(context->root) - 1);
-    strncpy(context->homePage, homePage, sizeof(context->homePage) - 1);
+    strncpy(context->homePage, config.homePage, sizeof(context->homePage) - 1);
     HANDLE thread = (HANDLE)_beginthreadex(NULL, 0, client_thread, context, 0, NULL);
     if (thread) {
       CloseHandle(thread);
     } else {
-      handle_client(client, root, homePage);
+      handle_client(client, root, config.homePage);
       free(context);
     }
   }
@@ -289,7 +299,7 @@ static void send_response(SOCKET client, int status, const char *statusText, con
   if (bodyLength > 0) send(client, body, bodyLength, 0);
 }
 
-static int read_home_page(const char *root, char *homePage, size_t homePageSize) {
+static int read_launcher_config(const char *root, LauncherConfig *config) {
   char configPath[MAX_PATH];
   HANDLE file;
   DWORD size;
@@ -300,6 +310,13 @@ static int read_home_page(const char *root, char *homePage, size_t homePageSize)
   char *quote;
   char *end;
   size_t length;
+  char *portKey;
+  char *portColon;
+  char *portStart;
+  unsigned long parsedPort;
+
+  memset(config, 0, sizeof(*config));
+  strcpy(config->homePage, "index.html");
 
   snprintf(configPath, sizeof(configPath), "%s\\BGT-Launcher.json", root);
   file = CreateFileA(configPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -318,25 +335,57 @@ static int read_home_page(const char *root, char *homePage, size_t homePageSize)
   CloseHandle(file);
 
   key = strstr(data, "\"homePage\"");
-  if (!key) {
-    free(data);
-    return 0;
+  if (key) {
+    colon = strchr(key, ':');
+    quote = colon ? strchr(colon, '"') : NULL;
+    end = quote ? quote + 1 : NULL;
+    if (end) {
+      while (*end && *end != '"') end++;
+      length = (size_t)(end - quote - 1);
+      if (length >= sizeof(config->homePage)) length = sizeof(config->homePage) - 1;
+      memcpy(config->homePage, quote + 1, length);
+      config->homePage[length] = '\0';
+      normalize_home_page(config->homePage);
+    }
   }
-  colon = strchr(key, ':');
-  quote = colon ? strchr(colon, '"') : NULL;
-  end = quote ? quote + 1 : NULL;
-  if (!end) {
-    free(data);
-    return 0;
+
+  portKey = strstr(data, "\"port\"");
+  portColon = portKey ? strchr(portKey, ':') : NULL;
+  portStart = portColon ? portColon + 1 : NULL;
+  if (portStart) {
+    while (isspace((unsigned char)*portStart)) portStart++;
+    parsedPort = strtoul(portStart, NULL, 10);
+    if (parsedPort >= MIN_USER_PORT && parsedPort <= MAX_PREVIEW_PORT) {
+      config->port = (unsigned short)parsedPort;
+      config->hasPort = 1;
+    }
   }
-  while (*end && *end != '"') end++;
-  length = (size_t)(end - quote - 1);
-  if (length >= homePageSize) length = homePageSize - 1;
-  memcpy(homePage, quote + 1, length);
-  homePage[length] = '\0';
-  normalize_home_page(homePage);
+
   free(data);
   return 1;
+}
+
+static int write_launcher_config(const char *root, const LauncherConfig *config) {
+  char configPath[MAX_PATH];
+  char homePage[MAX_HOME_PAGE];
+  char data[1024];
+  HANDLE file;
+  DWORD written;
+
+  strncpy(homePage, config->homePage, sizeof(homePage) - 1);
+  homePage[sizeof(homePage) - 1] = '\0';
+  backslash_to_slash(homePage);
+  snprintf(configPath, sizeof(configPath), "%s\\BGT-Launcher.json", root);
+  snprintf(data, sizeof(data), "{\r\n  \"homePage\": \"%s\",\r\n  \"port\": %u\r\n}\r\n", homePage, config->port);
+
+  file = CreateFileA(configPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (file == INVALID_HANDLE_VALUE) return 0;
+  if (!WriteFile(file, data, (DWORD)strlen(data), &written, NULL)) {
+    CloseHandle(file);
+    return 0;
+  }
+  CloseHandle(file);
+  return written == strlen(data);
 }
 
 static void normalize_home_page(char *value) {
@@ -352,6 +401,116 @@ static void normalize_home_page(char *value) {
     end--;
   }
   if (value[0] == '\0') strcpy(value, "index.html");
+}
+
+static SOCKET create_listening_server(unsigned short configuredPort, int hasConfiguredPort, unsigned short *actualPort, char *errorMessage, size_t errorMessageSize) {
+  SOCKET server;
+  int attempt;
+
+  if (errorMessageSize > 0) errorMessage[0] = '\0';
+
+  if (hasConfiguredPort) {
+    server = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (server == INVALID_SOCKET) {
+      snprintf(errorMessage, errorMessageSize, "无法创建本地服务器。");
+      return INVALID_SOCKET;
+    }
+    if (bind_and_listen(server, configuredPort, actualPort)) return server;
+    if (WSAGetLastError() == WSAEADDRINUSE) {
+      char owner[512];
+      describe_port_owner(configuredPort, owner, sizeof(owner));
+      snprintf(
+        errorMessage,
+        errorMessageSize,
+        "配置的端口 %u 已被占用。\n占用程序：%s\n请关闭该程序后重试，或修改 BGT-Launcher.json 中的 port。修改端口可能导致浏览器无法读取原端口下的网页游戏存档。",
+        configuredPort,
+        owner
+      );
+    } else {
+      snprintf(errorMessage, errorMessageSize, "无法启动本地服务器，端口：%u。", configuredPort);
+    }
+    closesocket(server);
+    return INVALID_SOCKET;
+  }
+
+  for (attempt = 0; attempt < 160; attempt++) {
+    unsigned short port = random_preview_port();
+    server = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (server == INVALID_SOCKET) {
+      snprintf(errorMessage, errorMessageSize, "无法创建本地服务器。");
+      return INVALID_SOCKET;
+    }
+    if (bind_and_listen(server, port, actualPort)) return server;
+    closesocket(server);
+  }
+
+  snprintf(errorMessage, errorMessageSize, "没有找到可用的大于 10000 的本地服务端口。");
+  return INVALID_SOCKET;
+}
+
+static int bind_and_listen(SOCKET server, unsigned short port, unsigned short *actualPort) {
+  struct sockaddr_in address;
+  int addressLength = sizeof(address);
+
+  memset(&address, 0, sizeof(address));
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = htons(port);
+
+  if (bind(server, (struct sockaddr *)&address, sizeof(address)) == SOCKET_ERROR ||
+      listen(server, SOMAXCONN) == SOCKET_ERROR ||
+      getsockname(server, (struct sockaddr *)&address, &addressLength) == SOCKET_ERROR) {
+    return 0;
+  }
+  *actualPort = ntohs(address.sin_port);
+  return 1;
+}
+
+static unsigned short random_preview_port(void) {
+  return (unsigned short)(MIN_RANDOM_PREVIEW_PORT + (rand() % (MAX_PREVIEW_PORT - MIN_RANDOM_PREVIEW_PORT + 1)));
+}
+
+static void describe_port_owner(unsigned short port, char *out, size_t outSize) {
+  DWORD size = 0;
+  PMIB_TCPTABLE_OWNER_PID table = NULL;
+  DWORD result;
+  DWORD index;
+
+  snprintf(out, outSize, "未知程序");
+  result = GetExtendedTcpTable(NULL, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0);
+  if (result != ERROR_INSUFFICIENT_BUFFER || size == 0) return;
+  table = (PMIB_TCPTABLE_OWNER_PID)malloc(size);
+  if (!table) return;
+  result = GetExtendedTcpTable(table, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0);
+  if (result != NO_ERROR) {
+    free(table);
+    return;
+  }
+
+  for (index = 0; index < table->dwNumEntries; index++) {
+    MIB_TCPROW_OWNER_PID row = table->table[index];
+    if (ntohs((u_short)row.dwLocalPort) == port) {
+      DWORD pid = row.dwOwningPid;
+      HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+      if (process) {
+        char processPath[MAX_PATH];
+        DWORD processPathSize = sizeof(processPath);
+        if (QueryFullProcessImageNameA(process, 0, processPath, &processPathSize)) {
+          char *name = strrchr(processPath, '\\');
+          snprintf(out, outSize, "%s (PID %lu)", name ? name + 1 : processPath, (unsigned long)pid);
+        } else {
+          snprintf(out, outSize, "PID %lu", (unsigned long)pid);
+        }
+        CloseHandle(process);
+      } else {
+        snprintf(out, outSize, "PID %lu", (unsigned long)pid);
+      }
+      free(table);
+      return;
+    }
+  }
+
+  free(table);
 }
 
 static int build_safe_path(const char *root, const char *relative, char *outPath, size_t outPathSize) {

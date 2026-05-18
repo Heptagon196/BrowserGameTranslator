@@ -4,8 +4,8 @@ import { layout as layoutText, prepare as prepareText } from "@chenglou/pretext"
 import * as RadixContextMenu from "@radix-ui/react-context-menu";
 import * as RadixPopover from "@radix-ui/react-popover";
 import * as RadixTabs from "@radix-ui/react-tabs";
-import { CheckSquare, Eye, FileSearch, Languages, Plus, PlusCircle, RotateCcw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
-import type { AnalysisResult, AppStateSnapshot, CharacterEntry, GlossaryEntry, NoTranslateEntry, ProjectConfig, ProviderConfig, TextItem } from "../../../shared/types";
+import { CheckSquare, CircleHelp, Eye, FileSearch, Languages, Plus, PlusCircle, RotateCcw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
+import type { AnalysisResult, AppStateSnapshot, CharacterEntry, CharacterNameAmbiguity, GlossaryEntry, NoTranslateEntry, ProjectConfig, ProviderConfig, TextItem } from "../../../shared/types";
 import type { SourceHighlight, SourceViewerState } from "../source-viewer/types";
 import { CommandSelect } from "../ui/Selectors";
 import { AppDialog, AppTooltip, CheckboxControl, StyledSelect, ToggleSwitch } from "../ui/Primitives";
@@ -1684,16 +1684,18 @@ export function CharacterResourceTable({ rows, textItems, sourceLanguage, tableS
       }}
       onRowsChange={readOnly ? undefined : onChange}
       onTranslateSelected={readOnly ? undefined : onTranslateRows}
-      createRow={readOnly ? undefined : () => ({ id: `char_${Date.now()}`, source: "", target: "", familyName: "", familyNameTranslation: "", givenName: "", givenNameTranslation: "", nicknameOf: "", note: "", enabled: true })}
+      createRow={readOnly ? undefined : () => ({ id: `char_${Date.now()}`, source: "", target: "", familyName: "", familyNameTranslation: "", givenName: "", givenNameTranslation: "", nicknameOf: "", ambiguity: undefined, note: "", enabled: true })}
       filters={[
         { label: "启用", value: "enabled", predicate: (row) => row.enabled },
         { label: "关闭", value: "disabled", predicate: (row) => !row.enabled },
+        { label: "易混淆", value: "ambiguity", predicate: (row) => hasCharacterAmbiguity(row.ambiguity) },
         { label: "未译", value: "missing", predicate: (row) => !row.target.trim() }
       ]}
       columns={[
         { key: "enabled", title: "启用", width: "64px", text: (row) => String(row.enabled), render: (row) => <ToggleSwitch checked={row.enabled} onChange={(enabled) => update(row, { enabled })} title="启用" disabled={readOnly} /> },
         { key: "source", title: "原名", width: "150px", text: (row) => row.source, render: (row) => <ResourceTextInput value={row.source} onCommit={(source) => update(row, { source })} readOnly={readOnly} /> },
         { key: "target", title: "译名", width: "150px", text: (row) => row.target, render: (row) => <ResourceTextInput value={row.target} onCommit={(target) => update(row, { target })} readOnly={readOnly} /> },
+        { key: "ambiguity", title: "易混淆", width: "72px", text: (row) => characterAmbiguityLabel(row.ambiguity), render: (row) => <CharacterAmbiguityButton ambiguity={row.ambiguity} readOnly={readOnly} onChange={(ambiguity) => update(row, { ambiguity })} /> },
         { key: "family", title: "姓/姓译", width: "170px", text: (row) => `${row.familyName ?? ""} ${row.familyNameTranslation ?? ""}`, render: (row) => <div className="stacked-inputs"><ResourceTextInput value={row.familyName ?? ""} onCommit={(familyName) => update(row, { familyName })} readOnly={readOnly} /><ResourceTextInput value={row.familyNameTranslation ?? ""} onCommit={(familyNameTranslation) => update(row, { familyNameTranslation })} readOnly={readOnly} /></div> },
         { key: "given", title: "名/名译", width: "170px", text: (row) => `${row.givenName ?? ""} ${row.givenNameTranslation ?? ""}`, render: (row) => <div className="stacked-inputs"><ResourceTextInput value={row.givenName ?? ""} onCommit={(givenName) => update(row, { givenName })} readOnly={readOnly} /><ResourceTextInput value={row.givenNameTranslation ?? ""} onCommit={(givenNameTranslation) => update(row, { givenNameTranslation })} readOnly={readOnly} /></div> },
         { key: "note", title: "备注", text: (row) => row.note, render: (row) => <ResourceTextInput value={row.note} onCommit={(note) => update(row, { note })} readOnly={readOnly} /> },
@@ -1701,6 +1703,70 @@ export function CharacterResourceTable({ rows, textItems, sourceLanguage, tableS
       ]}
     />
   );
+}
+
+const characterAmbiguityOptions: Array<{ key: keyof CharacterNameAmbiguity; label: string }> = [
+  { key: "source", label: "姓名" },
+  { key: "familyName", label: "姓" },
+  { key: "givenName", label: "名" }
+];
+
+function CharacterAmbiguityButton({
+  ambiguity,
+  readOnly,
+  onChange
+}: {
+  ambiguity?: CharacterNameAmbiguity;
+  readOnly: boolean;
+  onChange: (ambiguity: CharacterNameAmbiguity | undefined) => void;
+}) {
+  const active = hasCharacterAmbiguity(ambiguity);
+  const update = (key: keyof CharacterNameAmbiguity, checked: boolean) => {
+    const next: CharacterNameAmbiguity = {
+      source: ambiguity?.source,
+      familyName: ambiguity?.familyName,
+      givenName: ambiguity?.givenName,
+      [key]: checked
+    };
+    onChange(hasCharacterAmbiguity(next) ? next : undefined);
+  };
+  return (
+    <RadixPopover.Root>
+      <RadixPopover.Trigger asChild>
+        <button
+          aria-label={active ? `易混淆字段：${characterAmbiguityLabel(ambiguity)}` : "设置易混淆字段"}
+          className={active ? "icon-button column-menu-button character-ambiguity-button active" : "icon-button column-menu-button character-ambiguity-button"}
+          disabled={readOnly}
+          title={active ? `易混淆字段：${characterAmbiguityLabel(ambiguity)}` : "设置易混淆字段"}
+          type="button"
+        >
+          <CircleHelp size={15} />
+        </button>
+      </RadixPopover.Trigger>
+      <RadixPopover.Portal>
+        <RadixPopover.Content className="column-menu-popover character-ambiguity-popover" align="start" sideOffset={6}>
+          <strong>易混淆字段</strong>
+          {characterAmbiguityOptions.map((option) => (
+            <label key={option.key}>
+              <CheckboxControl compact checked={Boolean(ambiguity?.[option.key])} onChange={(checked) => update(option.key, checked)} />
+              <span>{option.label}</span>
+            </label>
+          ))}
+        </RadixPopover.Content>
+      </RadixPopover.Portal>
+    </RadixPopover.Root>
+  );
+}
+
+function hasCharacterAmbiguity(ambiguity: CharacterNameAmbiguity | undefined): boolean {
+  return Boolean(ambiguity?.source || ambiguity?.familyName || ambiguity?.givenName);
+}
+
+function characterAmbiguityLabel(ambiguity: CharacterNameAmbiguity | undefined): string {
+  return characterAmbiguityOptions
+    .filter((option) => Boolean(ambiguity?.[option.key]))
+    .map((option) => option.label)
+    .join("、");
 }
 
 export function GlossaryResourceTable({ rows, textItems, sourceLanguage, tableSettings, onChange, onTranslateRows, readOnly = false }: { rows: GlossaryEntry[]; textItems: TextItem[]; sourceLanguage?: string; tableSettings: TableSettings; onChange: (rows: GlossaryEntry[]) => void; onTranslateRows?: (rows: GlossaryEntry[]) => void | Promise<void>; readOnly?: boolean }) {

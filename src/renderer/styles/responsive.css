@@ -71,6 +71,10 @@
     flex-direction: column;
   }
 
+  .workflow-panel-row {
+    flex-direction: column;
+  }
+
   .export-inline .styled-select-trigger {
     width: 100%;
   }

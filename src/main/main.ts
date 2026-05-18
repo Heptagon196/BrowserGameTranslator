@@ -1,21 +1,24 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { app, BrowserWindow, clipboard, ipcMain, shell, Menu } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, shell, Menu, type IpcMainInvokeEvent } from "electron";
 import { getFonts } from "font-list";
 import { downloadAaOnlineGame, validateAaOfflineOutputDirectory } from "./aaofflineService";
 import { AgentChatHistoryService } from "./agent/agentChatHistoryService";
 import { recordAgentToolResultInTaskPlan, runAgent } from "./agent/agentRuntime";
 import { executeAgentTool } from "./agent/agentTools";
-import { generateAiLocalizationPlanWithIo, loadAiLocalizationPlan } from "./aiLocalizationService";
+import { loadAiLocalizationPlan } from "./aiLocalizationService";
+import { reviewExtractionRuleGroupsWithAi } from "./aiExtractionReviewService";
 import { AiResponseParseError, analyzeWithProviderWithIo, proofreadWithProviderWithIo, setAiUsageRecorder, testProvider, translateAnalysisResourcesWithProviderWithIo, translateWithProvider } from "./aiProvider";
 import { loadProviderBalance } from "./costService";
 import { createEmptyDictionaryTable, deleteDictionaryTable, exportDictionaryTable, importDictionaryTable, listDictionaryTables, loadDictionaryTable, saveDictionaryTable as saveDictionaryTableFile } from "./dictionaryService";
-import { extractGameTexts } from "./extractors";
+import { createProjectExtractionRulePackage, loadConfirmedExtractionRules, loadExtractionCandidates, loadExtractionRuleGroups, materializeProjectTextItemsFromRules, saveExtractionRuleDecisions, scanProjectExtractionRules } from "./extractionRuleService";
+import { copyExtractionRulePackageToGlobal, copyExtractionRulePackageToProject, deleteExtractionRulePackage, dryRunExtractionRulePackage, exportExtractionRulePackage, importExtractionRulePackage, listExtractionRulePackages, loadExtractionRulePackage, saveExtractionRulePackage } from "./extractionRulePackageService";
 import { exportTextItems, importTextItems } from "./importExport";
 import { analyzeLocally } from "./localAnalysis";
 import { buildOnlineDictionaryInlineSubmission, deleteOnlineDictionaryTable, exportOnlineDictionarySubmissionPackage, getOnlineDictionaryTokenStatus, importOnlineDictionaryTable as importRemoteDictionaryTable, listOnlineDictionarySources, listOnlineDictionaryTables, loadOnlineDictionaryTable, loadOnlineDictionaryTableByUrl, publishOnlineDictionaryTable, saveOnlineDictionarySources, saveOnlineDictionaryToken, testOnlineDictionarySource, updateOnlineDictionaryTable } from "./onlineDictionaryService";
-import { downloadItchHtml5Game } from "./itchService";
+import { buildOnlineExtractionRuleInlineSubmission, deleteOnlineExtractionRulePackage, getOnlineExtractionRuleTokenStatus, importOnlineExtractionRulePackage, listOnlineExtractionRulePackages, listOnlineExtractionRuleSources, loadOnlineExtractionRulePackage, publishOnlineExtractionRulePackage, saveOnlineExtractionRuleSources, saveOnlineExtractionRuleToken, testOnlineExtractionRuleSource, updateOnlineExtractionRulePackage } from "./onlineExtractionRuleService";
+import { downloadWebGame, validateWebGameOutputDirectory } from "./webGameDownloadService";
 import { applyPatch, previewPatch, restoreWorkingCopy } from "./patchService";
 import { openProjectDirectory as openProjectDirectoryInShell, packageProject } from "./packageService";
 import { getProjectPreviewStatus, previewProjectGame, stopProjectGamePreview } from "./previewService";
@@ -30,7 +33,6 @@ import {
   AgentRunRequest,
   AgentRunStreamRequest,
   AgentToolApprovalRequest,
-  ItchDownloadInput,
   PackageProjectInput,
   ProgramAiIoEvent,
   ProofreadIssue,
@@ -41,7 +43,13 @@ import {
   OnlineDictionarySettings,
   OnlineDictionarySubmissionOptions,
   OnlineDictionaryUpdateOptions,
-  TextItem
+  OnlineExtractionRuleSettings,
+  OnlineExtractionRuleSubmissionOptions,
+  ExtractionDecision,
+  ExtractionRulePackage,
+  ExtractionRuleScope,
+  TextItem,
+  WebGameDownloadInput
 } from "../shared/types";
 
 if (isWebSearchCdpHostProcess()) {
@@ -53,6 +61,7 @@ if (isWebSearchCdpHostProcess()) {
 const projectService = new ProjectService();
 const agentChatHistoryService = new AgentChatHistoryService(projectService);
 const activeAgentRuns = new Map<string, AbortController>();
+const programAiIoEvents: ProgramAiIoEvent[] = [];
 
 function optionalProject() {
   try {
@@ -68,6 +77,8 @@ function publishProgramAiIo(event: Omit<ProgramAiIoEvent, "id" | "createdAt">): 
     createdAt: new Date().toISOString(),
     ...event
   };
+  programAiIoEvents.push(payload);
+  if (programAiIoEvents.length > 200) programAiIoEvents.splice(0, programAiIoEvents.length - 200);
   for (const window of BrowserWindow.getAllWindows()) {
     window.webContents.send("ai-program:io", payload);
   }
@@ -75,11 +86,17 @@ function publishProgramAiIo(event: Omit<ProgramAiIoEvent, "id" | "createdAt">): 
 
 async function withProgramAiIo<T>(
   title: string,
-  task: () => Promise<T & { requestMessages?: Array<{ role: string; content: string }>; responseContent?: string }>
+  task: () => Promise<T & {
+    requestMessages?: Array<{ role: string; content: string }>;
+    responseContent?: string;
+    programAiIoEvents?: Array<Omit<ProgramAiIoEvent, "id" | "createdAt">>;
+  }>
 ): Promise<T> {
   try {
     const result = await task();
-    if (result.requestMessages?.length || result.responseContent) {
+    if (result.programAiIoEvents?.length) {
+      for (const event of result.programAiIoEvents) publishProgramAiIo(event);
+    } else if (result.requestMessages?.length || result.responseContent) {
       publishProgramAiIo({
         title,
         requestMessages: result.requestMessages ?? [],
@@ -172,7 +189,7 @@ ipcMain.handle("project:validateCreate", async (_event, input) => projectService
 ipcMain.handle("project:recent", async () => projectService.loadRecentProjects());
 ipcMain.handle("project:refresh", async () => projectService.refresh());
 ipcMain.handle("project:update", async (_event, project) => projectService.updateProject(project));
-ipcMain.handle("project:previewGame", async () => previewProjectGame(projectService.project));
+ipcMain.handle("project:previewGame", async () => previewProjectGame(await projectService.ensurePreviewPort()));
 ipcMain.handle("project:previewStatus", async () => getProjectPreviewStatus(projectService.project));
 ipcMain.handle("project:stopPreview", async () => stopProjectGamePreview(projectService.project));
 ipcMain.handle("project:openDirectoryInShell", async () => openProjectDirectoryInShell(projectService.project, shell.openPath));
@@ -183,6 +200,7 @@ ipcMain.handle("providers:setActive", async (_event, activeProviderId: string) =
 ipcMain.handle("providers:setActiveChat", async (_event, activeChatProviderId: string) => projectService.saveActiveChatProviderId(activeChatProviderId));
 ipcMain.handle("providers:test", async (_event, provider: ProviderConfig) => testProvider(provider, await projectService.loadEffectivePrompts()));
 ipcMain.handle("ai-balance:load", async (_event, provider: ProviderConfig) => loadProviderBalance(provider));
+ipcMain.handle("ai-program:list-io", async () => programAiIoEvents);
 ipcMain.handle("agent:run", async (_event, request: AgentRunRequest) => runAgent(projectService, request));
 ipcMain.handle("agent:runStream", async (event, request: AgentRunStreamRequest) => {
   const controller = new AbortController();
@@ -217,12 +235,18 @@ ipcMain.handle("prompts:load", async (_event, scope: PromptScope) => projectServ
 ipcMain.handle("prompts:save", async (_event, scope: PromptScope, prompts: PromptConfig) => projectService.savePrompts(scope, prompts));
 ipcMain.handle("prompts:defaults", async () => projectService.loadDefaultPrompts());
 
-ipcMain.handle("tools:itch:downloadHtml5", async (event, input: ItchDownloadInput) => {
+ipcMain.handle("tools:webGame:download", async (event, input: WebGameDownloadInput) => {
   const sender = event.sender;
-  return downloadItchHtml5Game(input, (logEvent) => {
-    if (!sender.isDestroyed()) sender.send("tools:itch:log", logEvent);
+  return downloadWebGame(input, {
+    onEvent: (logEvent) => {
+      if (!sender.isDestroyed()) sender.send("tools:webGame:log", logEvent);
+    },
+    onProgress: (progress) => {
+      if (!sender.isDestroyed()) sender.send("tools:webGame:progress", progress);
+    }
   });
 });
+ipcMain.handle("tools:webGame:validateOutput", async (_event, outputPath: string) => validateWebGameOutputDirectory(outputPath));
 ipcMain.handle("tools:aaoffline:download", async (event, input: AaOfflineDownloadInput) => {
   const sender = event.sender;
   return downloadAaOnlineGame(input, (logEvent) => {
@@ -231,34 +255,41 @@ ipcMain.handle("tools:aaoffline:download", async (event, input: AaOfflineDownloa
 });
 ipcMain.handle("tools:aaoffline:validateOutput", async (_event, outputPath: string) => validateAaOfflineOutputDirectory(outputPath));
 
-ipcMain.handle("extract:start", async () => {
-  const project = projectService.project;
-  const result = await extractGameTexts(projectDirs(project).originalRoot);
-  await writeJsonl(projectPaths(project).textItems, result.items);
-  await writeJson(projectPaths(project).scanReport, result.report);
-  await appendLog(project, `Extracted ${result.items.length} text items from ${result.report.fileCount} files.`);
+ipcMain.handle("extractionRules:scan", async (event) => {
+  const sender = event.sender;
+  return scanProjectExtractionRules(projectService.project, (progress) => {
+    if (!sender.isDestroyed()) sender.send("extractionRules:scanProgress", progress);
+  });
+});
+ipcMain.handle("extractionRules:listCandidates", async () => loadExtractionCandidates(projectService.project));
+ipcMain.handle("extractionRules:listGroups", async () => loadExtractionRuleGroups(projectService.project));
+ipcMain.handle("extractionRules:listRules", async () => loadConfirmedExtractionRules(projectService.project));
+ipcMain.handle("extractionRules:reviewWithAi", async (event, provider: ProviderConfig, options?: { decisions?: ExtractionDecision[] }) => {
+  const sender = event.sender;
+  const output = await reviewExtractionRuleGroupsWithAi(projectService.project, provider, await projectService.loadEffectivePrompts(), options, {
+    onProgramAiIoEvent: publishProgramAiIo,
+    onProgress: (progress) => {
+      if (!sender.isDestroyed()) sender.send("extractionRules:aiReviewProgress", progress);
+    }
+  });
+  return output.groups;
+});
+ipcMain.handle("extractionRules:saveDecisions", async (_event, updates: Array<{ groupId: string; decision: ExtractionDecision; note?: string }>) => saveExtractionRuleDecisions(projectService.project, updates));
+ipcMain.handle("extractionRules:materializeTextItems", async () => {
+  await materializeProjectTextItemsFromRules(projectService.project);
   return projectService.refresh();
 });
+ipcMain.handle("extractionRules:createProjectPackage", async (_event, displayName?: string) => createProjectExtractionRulePackage(projectService.project, displayName));
 
-ipcMain.handle("extract:aiPlan", async (_event, provider: ProviderConfig) => {
-  const project = projectService.project;
-  const { plan } = await withProgramAiIo("AI 生成提取方案", async () =>
-    generateAiLocalizationPlanWithIo(project, provider, await projectService.loadEffectivePrompts())
-  );
-  await appendLog(project, `AI localization plan generated for ${plan.engine}.`);
-  return projectService.refresh();
-});
-
-ipcMain.handle("extract:ai", async () => {
-  const project = projectService.project;
-  const plan = await loadAiLocalizationPlan(project);
-  if (!plan) throw new Error("没有 AI 本地化方案。请先生成 AI 方案。");
-  const result = await extractGameTexts(projectDirs(project).originalRoot, { includeFiles: plan.includeFiles, excludeFiles: plan.excludeFiles });
-  await writeJsonl(projectPaths(project).textItems, result.items);
-  await writeJson(projectPaths(project).scanReport, result.report);
-  await appendLog(project, `AI-guided extraction completed with ${result.items.length} text items using ${plan.engine}.`);
-  return projectService.refresh();
-});
+ipcMain.handle("extractionRulePackages:list", async () => listExtractionRulePackages(optionalProject()));
+ipcMain.handle("extractionRulePackages:load", async (_event, scope: ExtractionRuleScope, id: string, fileName?: string) => loadExtractionRulePackage(scope, id, optionalProject(), fileName));
+ipcMain.handle("extractionRulePackages:save", async (_event, scope: ExtractionRuleScope, pkg: ExtractionRulePackage, fileName?: string) => saveExtractionRulePackage(scope, pkg, optionalProject(), fileName));
+ipcMain.handle("extractionRulePackages:delete", async (_event, scope: ExtractionRuleScope, id: string, fileName?: string) => deleteExtractionRulePackage(scope, id, optionalProject(), fileName));
+ipcMain.handle("extractionRulePackages:import", async (_event, scope: ExtractionRuleScope, conflictMode?: "overwrite" | "newId", pendingPackage?: ExtractionRulePackage) => importExtractionRulePackage(scope, optionalProject(), conflictMode, pendingPackage));
+ipcMain.handle("extractionRulePackages:export", async (_event, pkg: ExtractionRulePackage) => exportExtractionRulePackage(pkg));
+ipcMain.handle("extractionRulePackages:dryRun", async (_event, pkg: ExtractionRulePackage) => dryRunExtractionRulePackage(projectService.project, pkg));
+ipcMain.handle("extractionRulePackages:applyToProject", async (_event, pkg: ExtractionRulePackage) => copyExtractionRulePackageToProject(pkg, projectService.project));
+ipcMain.handle("extractionRulePackages:copyToGlobal", async (_event, pkg: ExtractionRulePackage) => copyExtractionRulePackageToGlobal(pkg));
 
 ipcMain.handle("items:save", async (_event, items: TextItem[]) => projectService.saveTextItems(items));
 ipcMain.handle("items:export", async (_event, items: TextItem[], format: "jsonl" | "csv") => exportTextItems(projectService.project, items, format));
@@ -325,6 +356,18 @@ ipcMain.handle("online-dictionaries:update-table", async (_event, table, options
 ipcMain.handle("online-dictionaries:delete-table", async (_event, sourceId: string, discussionId: string) => deleteOnlineDictionaryTable(sourceId, discussionId, optionalProject()));
 ipcMain.handle("online-dictionaries:export-submission-package", async (_event, table, options: OnlineDictionarySubmissionOptions) => exportOnlineDictionarySubmissionPackage(table, options));
 ipcMain.handle("online-dictionaries:inline-submission", async (_event, table, options: OnlineDictionarySubmissionOptions) => buildOnlineDictionaryInlineSubmission(table, options));
+ipcMain.handle("online-extraction-rules:list-sources", async () => listOnlineExtractionRuleSources());
+ipcMain.handle("online-extraction-rules:save-sources", async (_event, settings: OnlineExtractionRuleSettings) => saveOnlineExtractionRuleSources(settings));
+ipcMain.handle("online-extraction-rules:token-status", async () => getOnlineExtractionRuleTokenStatus());
+ipcMain.handle("online-extraction-rules:save-token", async (_event, token: string) => saveOnlineExtractionRuleToken(token));
+ipcMain.handle("online-extraction-rules:test-source", async (_event, sourceId: string) => testOnlineExtractionRuleSource(sourceId));
+ipcMain.handle("online-extraction-rules:list-packages", async (_event, sourceId: string, webSearchQuery?: string, page?: number, mineOnly?: boolean) => listOnlineExtractionRulePackages(sourceId, webSearchQuery, page, mineOnly));
+ipcMain.handle("online-extraction-rules:load-package", async (_event, sourceId: string, discussionId: string) => loadOnlineExtractionRulePackage(sourceId, discussionId));
+ipcMain.handle("online-extraction-rules:import-package", async (_event, sourceId: string, discussionId: string) => importOnlineExtractionRulePackage(sourceId, discussionId));
+ipcMain.handle("online-extraction-rules:publish-package", async (_event, pkg: ExtractionRulePackage, options: OnlineExtractionRuleSubmissionOptions) => publishOnlineExtractionRulePackage(pkg, options));
+ipcMain.handle("online-extraction-rules:update-package", async (_event, pkg: ExtractionRulePackage, options: OnlineExtractionRuleSubmissionOptions & { discussionId: string; expectedRevision?: number }) => updateOnlineExtractionRulePackage(pkg, options));
+ipcMain.handle("online-extraction-rules:delete-package", async (_event, sourceId: string, discussionId: string) => deleteOnlineExtractionRulePackage(sourceId, discussionId, optionalProject()));
+ipcMain.handle("online-extraction-rules:inline-submission", async (_event, pkg: ExtractionRulePackage, options: OnlineExtractionRuleSubmissionOptions) => buildOnlineExtractionRuleInlineSubmission(pkg, options));
 ipcMain.handle("analysis:translateMissing", async (_event, provider: ProviderConfig) => {
   const project = projectService.project;
   const analysis = await projectService.readAnalysis();
@@ -353,9 +396,9 @@ ipcMain.handle("translation:start", async (_event, provider: ProviderConfig, tar
   await appendLog(project, "Translation task completed.");
   return translated;
 });
-ipcMain.handle("translation:batch", async (_event, provider: ProviderConfig, targetLanguage: string, items: TextItem[]) => {
+ipcMain.handle("translation:batch", async (_event, provider: ProviderConfig, targetLanguage: string, items: TextItem[], options?: { titlePrefix?: string; batchIndexOffset?: number; batchTotal?: number }) => {
   const analysis = await projectService.readAnalysis();
-  const titlePrefix = items.length === 1 ? `AI 翻译单行 ${items[0]?.id ?? ""} ` : `AI 翻译选中行（${items.length} 行） `;
+  const titlePrefix = options?.titlePrefix ?? (items.length === 1 ? `AI 翻译单行 ${items[0]?.id ?? ""} ` : `AI 翻译选中行（${items.length} 行） `);
   return translateWithProvider(
     provider,
     items,
@@ -364,7 +407,7 @@ ipcMain.handle("translation:batch", async (_event, provider: ProviderConfig, tar
     await projectService.loadEffectivePrompts(),
     analysis,
     (io) => publishProgramAiIo({ title: io.title ?? "AI 翻译选中行", requestMessages: io.requestMessages, responseContent: io.responseContent, ok: true }),
-    { force: true, titlePrefix }
+    { force: true, titlePrefix, batchIndexOffset: options?.batchIndexOffset, batchTotal: options?.batchTotal }
   );
 });
 ipcMain.handle("prompts:effective", async () => projectService.loadEffectivePrompts());
@@ -376,7 +419,7 @@ ipcMain.handle("proofread:start", async (_event, items: TextItem[], analysis, op
   await appendLog(project, `Proofreading found ${issues.length} issues.`);
   return issues;
 });
-ipcMain.handle("proofread:ai", async (_event, provider: ProviderConfig, issues: ProofreadIssue[]) => {
+ipcMain.handle("proofread:ai", async (_event, provider: ProviderConfig, issues: ProofreadIssue[], options?: { titlePrefix?: string; batchIndexOffset?: number; batchTotal?: number }) => {
   const project = projectService.project;
   const items = await projectService.readTextItems();
   const analysis = await projectService.readAnalysis();
@@ -389,7 +432,9 @@ ipcMain.handle("proofread:ai", async (_event, provider: ProviderConfig, issues: 
       project.sourceLanguage,
       project.targetLanguage,
       await projectService.loadEffectivePrompts(),
-      analysis
+      analysis,
+      (io) => publishProgramAiIo({ title: io.title ?? "AI 自动校对", requestMessages: io.requestMessages, responseContent: io.responseContent, ok: true }),
+      options
     )
   );
   await projectService.saveTextItems(proofreadItemsResult);
@@ -398,15 +443,34 @@ ipcMain.handle("proofread:ai", async (_event, provider: ProviderConfig, issues: 
 });
 
 ipcMain.handle("patch:preview", async (_event, items: TextItem[]) => previewPatch(projectService.project, items));
-ipcMain.handle("patch:apply", async (_event, items: TextItem[]) => applyPatch(projectService.project, items));
-ipcMain.handle("patch:aiApply", async (_event, items: TextItem[]) => {
+ipcMain.handle("patch:apply", async (event, items: TextItem[]) =>
+  runPatchWithProgress(event, () => applyPatch(projectService.project, items, (progress) => event.sender.send("patch:progress", progress)))
+);
+ipcMain.handle("patch:aiApply", async (event, items: TextItem[]) => {
   const plan = await loadAiLocalizationPlan(projectService.project);
   if (!plan) throw new Error("没有 AI 本地化方案。请先生成 AI 方案。");
-  return applyPatch(projectService.project, items);
+  return runPatchWithProgress(event, () => applyPatch(projectService.project, items, (progress) => event.sender.send("patch:progress", progress)));
 });
-ipcMain.handle("patch:restore", async () => {
-  await restoreWorkingCopy(projectService.project);
-  await appendLog(projectService.project, "Working copy restored from original snapshot.");
-  return projectService.refresh();
+ipcMain.handle("patch:restore", async (event) => {
+  return runPatchWithProgress(event, async () => {
+    await restoreWorkingCopy(projectService.project, (progress) => event.sender.send("patch:progress", progress));
+    await appendLog(projectService.project, "Working copy restored from original snapshot.");
+    return projectService.refresh();
+  });
 });
+}
+
+async function runPatchWithProgress<T>(event: IpcMainInvokeEvent, task: () => Promise<T>): Promise<T> {
+  try {
+    return await task();
+  } catch (error) {
+    event.sender.send("patch:progress", {
+      phase: "done",
+      current: 0,
+      total: 0,
+      percent: 100,
+      message: `回填失败：${error instanceof Error ? error.message : String(error)}`
+    });
+    throw error;
+  }
 }

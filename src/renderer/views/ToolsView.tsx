@@ -1,16 +1,18 @@
 import { useEffect, useState } from "react";
 import * as RadixCollapsible from "@radix-ui/react-collapsible";
 import { Download } from "lucide-react";
-import type { AaOfflineDownloadEvent, AaOfflineDownloadResult, ItchDownloadEvent, ItchDownloadResult } from "../../shared/types";
+import type { AaOfflineDownloadEvent, AaOfflineDownloadResult, WebGameDownloadEvent, WebGameDownloadProgress, WebGameDownloadResult } from "../../shared/types";
 import { FieldRow, PathInput } from "../components/ui/Form";
 import { AppDialog, CheckboxControl, StyledSelect } from "../components/ui/Primitives";
 
 export default function ToolsView({ run }: { run: <T>(message: string, task: () => Promise<T>, onDone?: (value: T) => void) => Promise<T | undefined> }) {
-  const [itchModalOpen, setItchModalOpen] = useState(false);
+  const [webModalOpen, setWebModalOpen] = useState(false);
   const [url, setUrl] = useState("");
   const [outputDirectory, setOutputDirectory] = useState("");
-  const [result, setResult] = useState<ItchDownloadResult | null>(null);
-  const [itchLogs, setItchLogs] = useState<ItchDownloadEvent[]>([]);
+  const [outputErrors, setOutputErrors] = useState<string[]>(["请选择保存目录。"]);
+  const [result, setResult] = useState<WebGameDownloadResult | null>(null);
+  const [webLogs, setWebLogs] = useState<WebGameDownloadEvent[]>([]);
+  const [webProgress, setWebProgress] = useState<WebGameDownloadProgress | null>(null);
   const [aaModalOpen, setAaModalOpen] = useState(false);
   const [aaCaseUrlOrId, setAaCaseUrlOrId] = useState("");
   const [aaOutputPath, setAaOutputPath] = useState("");
@@ -23,12 +25,26 @@ export default function ToolsView({ run }: { run: <T>(message: string, task: () 
   const [aaResult, setAaResult] = useState<AaOfflineDownloadResult | null>(null);
 
   useEffect(() => {
-    return window.bgt.onItchDownloadLog((event) => setItchLogs((logs) => [...logs, event]));
+    return window.bgt.onWebGameDownloadLog((event) => setWebLogs((logs) => [...logs, event]));
+  }, []);
+
+  useEffect(() => {
+    return window.bgt.onWebGameDownloadProgress(setWebProgress);
   }, []);
 
   useEffect(() => {
     return window.bgt.onAaOfflineDownloadLog((event) => setAaLogs((logs) => [...logs, event]));
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void window.bgt.validateWebGameOutputDirectory(outputDirectory).then((errors) => {
+      if (!cancelled) setOutputErrors(errors);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [outputDirectory]);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,8 +68,9 @@ export default function ToolsView({ run }: { run: <T>(message: string, task: () 
 
   const startDownload = () => {
     setResult(null);
-    setItchLogs([]);
-    void run("下载 itch.io 网页游戏", () => window.bgt.downloadItchHtml5Game({ url, outputDirectory }), setResult);
+    setWebLogs([]);
+    setWebProgress(null);
+    void run("下载网页游戏", () => window.bgt.downloadWebGame({ url, outputDirectory }), setResult);
   };
 
   const startAaDownload = () => {
@@ -76,48 +93,61 @@ export default function ToolsView({ run }: { run: <T>(message: string, task: () 
 
   return (
     <div className="stack">
-      <button className="panel tool-entry" onClick={() => setItchModalOpen(true)}>
+      <button className="panel tool-entry" onClick={() => setWebModalOpen(true)}>
         <Download size={22} />
         <div>
-          <h2>itch.io 网页游戏下载</h2>
-          <p>下载 itch.io HTML5 网页游戏资源，用于离线保存和后续创建翻译项目。</p>
+          <h2>网页游戏下载</h2>
+          <p>下载 HTML5 网页游戏资源，用于离线保存和后续创建翻译项目。</p>
         </div>
       </button>
       <AppDialog
-        open={itchModalOpen}
-        title="itch.io 网页游戏下载"
-        description="填写游戏页面地址和保存目录后，程序会调用 itchio-downloader CLI 保存 HTML5 网页游戏资源和元数据。"
-        onOpenChange={setItchModalOpen}
+        open={webModalOpen}
+        title="网页游戏下载"
+        description="填写网页游戏地址和空保存目录后，程序会递归解析静态资源，并捕获启动阶段的运行时资源请求。"
+        onOpenChange={setWebModalOpen}
       >
         <div className="settings-form">
-          <FieldRow label="游戏页面 URL" description="填写 itch.io 游戏页面地址，例如 https://作者.itch.io/游戏名。">
-            <input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://example.itch.io/game" />
+          <FieldRow label="游戏页面 URL" description="填写网页游戏地址。下载器会自动解析常见内嵌 HTML5 游戏页面。">
+            <input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://example.com/game/index.html" />
           </FieldRow>
-          <FieldRow label="保存目录" description="选择下载文件保存的位置。下载器会在此目录下保存 HTML5 资源和元数据。">
+          <FieldRow label="保存目录" description="选择一个已经存在且为空的文件夹。下载器会直接在此目录下保存网页资源和下载索引。">
             <PathInput value={outputDirectory} onPick={chooseOutput} onChange={setOutputDirectory} />
           </FieldRow>
+          {outputErrors.length > 0 && (
+            <div className="error-list">
+              {outputErrors.map((error) => (
+                <div key={error}>{error}</div>
+              ))}
+            </div>
+          )}
           <div className="button-row">
-            <button disabled={!url.trim() || !outputDirectory.trim()} onClick={startDownload}>
+            <button disabled={!url.trim() || outputErrors.length > 0} onClick={startDownload}>
               <Download size={16} />
               下载网页游戏
             </button>
           </div>
         </div>
-        {(itchLogs.length > 0 || result) && (
+        {(webLogs.length > 0 || webProgress || result) && (
           <div className="tool-result">
             <h2>下载状态</h2>
+            {webProgress && (
+              <p>
+                {webProgress.message ?? "下载中"}：{webProgress.completed}/{webProgress.total}
+              </p>
+            )}
             {result && (
               <div className={result.status ? "success-box" : "error-list"}>
                 <strong>{result.status ? "下载完成" : "下载失败"}</strong>
                 <p>{result.message}</p>
                 {result.filePath && <p>文件：{result.filePath}</p>}
                 {result.metadataPath && <p>元数据：{result.metadataPath}</p>}
-                {result.html5Assets?.length ? <p>资源文件：{result.html5Assets.length} 个</p> : null}
+                {result.indexPath && <p>下载索引：{result.indexPath}</p>}
+                {result.assets?.length ? <p>资源文件：{result.assets.length} 个</p> : null}
               </div>
             )}
-            {itchLogs.length > 0 && (
+            {webLogs.length > 0 && (
               <pre className="tool-log">
-                {itchLogs
+                {webLogs
                   .map((entry) => `[${entry.stream}] ${entry.text.trimEnd()}`)
                   .filter(Boolean)
                   .join("\n")}

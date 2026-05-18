@@ -50,9 +50,14 @@ export function buildProgramTranslationPromptPreview(batch: TextItem[]): string 
 function buildProgramResourceSections(batch: TextItem[], analysis: AnalysisResult): string {
   const sourceText = batch.map((item) => item.original).join("\n");
   const sections: string[] = [];
-  const characters = analysis.characters.filter((entry) => entry.enabled && entry.source && sourceText.includes(entry.source));
-  if (characters.length) {
-    sections.push(["###角色表", "原文|译文|备注", ...characters.slice(0, 80).map((entry) => `${entry.source}|${entry.target || "待定"}|${entry.note}`)].join("\n"));
+  const characters = analysis.characters.filter((entry) => characterEntryMatchesSource(sourceText, entry));
+  const regularCharacters = characters.filter((entry) => !hasCharacterAmbiguity(entry.ambiguity));
+  const characterAmbiguityRows = characters.filter((entry) => hasCharacterAmbiguity(entry.ambiguity));
+  if (regularCharacters.length) {
+    sections.push(["###角色表", "原文|译文|备注", ...regularCharacters.slice(0, 80).map((entry) => `${entry.source}|${entry.target || "待定"}|${entry.note}`)].join("\n"));
+  }
+  if (characterAmbiguityRows.length) {
+    sections.push(["###易混淆角色名表", "原文|译文|易混淆字段|备注", ...characterAmbiguityRows.slice(0, 80).map((entry) => `${entry.source}|${entry.target || "待定"}|${characterAmbiguityLabel(entry.ambiguity)}|可能和普通词混淆，仅在对应字段确认为角色名时使用。${entry.note ? ` ${entry.note}` : ""}`)].join("\n"));
   }
   const terms = analysis.glossary.filter((entry) => entry.enabled && entry.source && sourceText.includes(entry.source));
   if (terms.length) {
@@ -65,10 +70,27 @@ function buildProgramResourceSections(batch: TextItem[], analysis: AnalysisResul
   return sections.join("\n\n");
 }
 
+function characterEntryMatchesSource(sourceText: string, entry: AnalysisResult["characters"][number]): boolean {
+  return entry.enabled && [entry.source, entry.familyName, entry.givenName].some((source) => source && sourceText.includes(source));
+}
+
+function hasCharacterAmbiguity(ambiguity: AnalysisResult["characters"][number]["ambiguity"]): boolean {
+  return Boolean(ambiguity?.source || ambiguity?.familyName || ambiguity?.givenName);
+}
+
+function characterAmbiguityLabel(ambiguity: AnalysisResult["characters"][number]["ambiguity"]): string {
+  return [
+    ambiguity?.source ? "姓名" : "",
+    ambiguity?.familyName ? "姓" : "",
+    ambiguity?.givenName ? "名" : ""
+  ].filter(Boolean).join("、") || "未标记";
+}
+
 export function ruleLabel(key: string): string {
   return {
     languageCheck: "语言比例检查",
     characterCheck: "人物检查",
+    characterAmbiguityCheck: "易混淆角色名检查",
     glossaryCheck: "术语检查",
     untranslatedStatusCheck: "未翻译状态",
     noTranslateCheck: "禁翻表",
@@ -78,6 +100,7 @@ export function ruleLabel(key: string): string {
     htmlTagCheck: "HTML 标签",
     emptyTranslationCheck: "空译文",
     character_missing: "人物缺失",
+    character_ambiguity_missing: "易混淆角色名",
     glossary_missing: "术语缺失",
     untranslated_status: "未翻译状态",
     empty_translation: "空译文",

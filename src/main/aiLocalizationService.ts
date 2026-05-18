@@ -117,7 +117,7 @@ function scoreSample(sample: FileSample): number {
   const haystack = `${sample.path}\n${sample.head}\n${sample.notableLines.join("\n")}`;
   let score = 0;
   if (/index\.html$/i.test(sample.path)) score += 30;
-  if (/trial_|initial_trial_data|Twine|SugarCube|RPG Maker|UnityLoader|__NEXT_DATA__|vite|React/i.test(haystack)) score += 60;
+  if (/Twine|SugarCube|RPG Maker|UnityLoader|__NEXT_DATA__|vite|React|story|passage|dialog|message|frames/i.test(haystack)) score += 60;
   if (/\.(json)$/i.test(sample.path)) score += 20;
   if (/\.(js|mjs)$/i.test(sample.path)) score += 10;
   return score;

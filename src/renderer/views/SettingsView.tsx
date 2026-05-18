@@ -35,6 +35,8 @@ export default function SettingsView({
   setTablePageSize,
   searchPaginationEnabled,
   setSearchPaginationEnabled,
+  autoPatchBeforeOutput,
+  setAutoPatchBeforeOutput,
   uiSettings,
   setUiSettings
 }: {
@@ -46,6 +48,8 @@ export default function SettingsView({
   setTablePageSize: React.Dispatch<React.SetStateAction<number>>;
   searchPaginationEnabled: boolean;
   setSearchPaginationEnabled: React.Dispatch<React.SetStateAction<boolean>>;
+  autoPatchBeforeOutput: boolean;
+  setAutoPatchBeforeOutput: React.Dispatch<React.SetStateAction<boolean>>;
   uiSettings: UiSettings;
   setUiSettings: React.Dispatch<React.SetStateAction<UiSettings>>;
 }) {
@@ -76,6 +80,10 @@ export default function SettingsView({
     const nextProject = { ...snapshot.project, ...patch };
     setSnapshot((state) => ({ ...state, project: nextProject }));
     void run("保存项目配置", () => window.bgt.updateProject(nextProject), (next) => setSnapshot(next));
+  };
+  const updateProjectPort = (value: string) => {
+    const trimmed = value.trim();
+    updateProject({ previewPort: trimmed ? Number(trimmed) : undefined });
   };
   const updateUiSettings = (patch: Partial<UiSettings>) => {
     setUiSettings((current) => ({ ...current, ...patch }));
@@ -301,11 +309,12 @@ export default function SettingsView({
     const id = `source_${Date.now().toString(36)}`;
     const source: OnlineDictionarySource = {
       id,
-      displayName: "新在线词典库",
+      displayName: "新在线仓库",
       url: "https://github.com/Heptagon196/BrowserGameTranslator",
       owner: "Heptagon196",
       repo: "BrowserGameTranslator",
-      category: "词典",
+      dictionaryCategory: "词典",
+      extractionRuleCategory: "提取规则",
       enabled: true
     };
     setOnlineSources((sources) => [...sources, source]);
@@ -352,9 +361,9 @@ export default function SettingsView({
           系统设置
         </button>
         <div className="settings-subnav">
-          <button onClick={() => scrollToSettingsSection(tableSettingsRef)}>表格</button>
+          <button onClick={() => scrollToSettingsSection(tableSettingsRef)}>全局设置</button>
           <button onClick={() => scrollToSettingsSection(uiSettingsRef)}>界面</button>
-          <button onClick={() => scrollToSettingsSection(onlineDictionaryRef)}>在线词典</button>
+          <button onClick={() => scrollToSettingsSection(onlineDictionaryRef)}>在线仓库</button>
         </div>
         <button className="settings-nav-primary" onClick={() => scrollToSettingsSection(providersSettingsRef)}>
           AI 后端
@@ -382,6 +391,16 @@ export default function SettingsView({
                   首页
                   <input value={snapshot.project.homePage || "index.html"} onChange={(event) => updateProject({ homePage: event.target.value || "index.html" })} />
                 </label>
+                <label>
+                  端口
+                  <input
+                    type="number"
+                    step="1"
+                    placeholder="自动分配"
+                    value={snapshot.project.previewPort ?? ""}
+                    onChange={(event) => updateProjectPort(event.target.value)}
+                  />
+                </label>
               </div>
             </div>
           ) : (
@@ -393,8 +412,11 @@ export default function SettingsView({
         </section>
         <section ref={tableSettingsRef} className="settings-section">
           <div className="panel">
-            <h2>全局表格设置</h2>
+            <h2>全局设置</h2>
             <div className="settings-form">
+              <FieldRow label="预览、打包前自动回填" description="开启后，点击预览游戏、再次打开预览或开始打包前，会先把当前文本表译文回填到游戏工作区。">
+                <ToggleSwitch checked={autoPatchBeforeOutput} onChange={setAutoPatchBeforeOutput} />
+              </FieldRow>
               <FieldRow label="每页行数" description="分页开启时每页最多显示多少行。这个选项只保存在本机，不写入项目。">
                 <input
                   type="number"
@@ -511,8 +533,8 @@ export default function SettingsView({
           <div className="panel">
             <div className="prompt-header">
               <div>
-                <h2>在线词典源</h2>
-                <p>配置 GitHub 仓库 URL 和 Discussions 分类。配置保存在本机，不写入项目工作区。</p>
+                <h2>在线仓库</h2>
+                <p>配置 GitHub 仓库 URL 和 Discussions 分类，用于在线词典与规则共享。配置保存在本机，不写入项目工作区。</p>
               </div>
               <button className="secondary-button" onClick={addOnlineSource}>
                 <Plus size={16} />
@@ -528,25 +550,28 @@ export default function SettingsView({
                     onClick={() => setSelectedOnlineSourceId(source.id)}
                   >
                     <strong>{source.displayName || source.url}</strong>
-                    <span>{source.owner}/{source.repo} · {source.category}{isReadonlyOnlineSource(source) ? " · 只读" : ""}</span>
+                    <span>{source.owner}/{source.repo} · 词典: {source.dictionaryCategory} · 提取规则: {source.extractionRuleCategory}{isReadonlyOnlineSource(source) ? " · 只读" : ""}</span>
                   </button>
                 ))}
               </div>
               {selectedOnlineSource ? (
                 <div className="model-config-detail">
-                  <FieldRow label="显示名称" description="显示在词典页在线词典源下拉框中。">
+                  <FieldRow label="显示名称" description="显示在词典页在线仓库下拉框中。">
                     <input value={selectedOnlineSource.displayName} disabled={selectedOnlineSourceReadonly} onChange={(event) => updateOnlineSource({ ...selectedOnlineSource, displayName: event.target.value })} />
                   </FieldRow>
                   <FieldRow label="GitHub 仓库 URL" description="填写 GitHub 仓库地址。">
                     <input value={selectedOnlineSource.url} disabled={selectedOnlineSourceReadonly} onChange={(event) => updateOnlineSource({ ...selectedOnlineSource, url: event.target.value })} />
                   </FieldRow>
-                  <FieldRow label="Discussions 分类" description="默认使用“词典”。">
-                    <input value={selectedOnlineSource.category} disabled={selectedOnlineSourceReadonly} onChange={(event) => updateOnlineSource({ ...selectedOnlineSource, category: event.target.value })} />
+                  <FieldRow label="词典 Category" description="用于在线词典列表、导入、投稿和更新。默认使用“词典”。">
+                    <input value={selectedOnlineSource.dictionaryCategory} disabled={selectedOnlineSourceReadonly} onChange={(event) => updateOnlineSource({ ...selectedOnlineSource, dictionaryCategory: event.target.value })} />
                   </FieldRow>
-                  <FieldRow label="启用" description="关闭后不会出现在词典页在线词典源列表中。">
+                  <FieldRow label="提取规则 Category" description="用于在线提取规则包列表、导入和投稿。默认使用“提取规则”。">
+                    <input value={selectedOnlineSource.extractionRuleCategory} disabled={selectedOnlineSourceReadonly} onChange={(event) => updateOnlineSource({ ...selectedOnlineSource, extractionRuleCategory: event.target.value })} />
+                  </FieldRow>
+                  <FieldRow label="启用" description="关闭后不会出现在词典页在线仓库列表中。">
                     <ToggleSwitch checked={selectedOnlineSource.enabled} disabled={selectedOnlineSourceReadonly} onChange={() => updateOnlineSource({ ...selectedOnlineSource, enabled: !selectedOnlineSource.enabled })} />
                   </FieldRow>
-                  <FieldRow label="使用 GitHub API Token" description="关闭后即使已保存 token，也按无 token 模式访问在线词典，方便测试公开网页抓取。">
+                  <FieldRow label="使用 GitHub API Token" description="关闭后即使已保存 token，也按无 token 模式访问在线仓库，方便测试公开网页抓取。">
                     <ToggleSwitch checked={onlineUseGithubToken} onChange={() => setOnlineUseGithubToken((enabled) => !enabled)} />
                   </FieldRow>
                   <FieldRow
@@ -572,11 +597,11 @@ export default function SettingsView({
                     />
                   </FieldRow>
                   <div className="button-row">
-                    <button onClick={() => run("保存在线词典设置", saveOnlineSources, () => showToast("在线词典设置已保存"))}>
+                    <button onClick={() => run("保存在线仓库设置", saveOnlineSources, () => showToast("在线仓库设置已保存"))}>
                       <Save size={16} />
                       保存
                     </button>
-                    <button className="secondary-button" onClick={() => run("测试在线词典源", testOnlineSource, () => showToast("连接词典成功"))}>测试连接</button>
+                    <button className="secondary-button" onClick={() => run("测试在线仓库", testOnlineSource, () => showToast("连接仓库成功"))}>测试连接</button>
                     <button className="danger-button" disabled={onlineSources.length <= 1 || selectedOnlineSourceReadonly} onClick={deleteOnlineSource}>
                       <Trash2 size={16} />
                       删除

@@ -20,10 +20,18 @@ import {
   DictionaryTable,
   DictionaryTableMeta,
   DictionaryTableSummary,
-  ItchDownloadEvent,
-  ItchDownloadInput,
-  ItchDownloadProgress,
-  ItchDownloadResult,
+  ExtractionCandidate,
+  ExtractionAiReviewProgress,
+  ExtractionDecision,
+  ExtractionRuleGroup,
+  ExtractionRulePackage,
+  ExtractionRulePackageDryRunResult,
+  ExtractionRulePackageImportResult,
+  ExtractionRulePackageSummary,
+  ExtractionRuleScanResult,
+  ExtractionRuleScope,
+  ExtractionScanProgress,
+  ExtractionRulesFile,
   OriginalSourceFile,
   OnlineDictionaryConnectionTest,
   OnlineDictionaryInlineSubmissionResult,
@@ -36,8 +44,14 @@ import {
   OnlineDictionaryTable,
   OnlineDictionaryTokenStatus,
   OnlineDictionaryUpdateOptions,
+  OnlineExtractionRuleListResult,
+  OnlineExtractionRuleInlineSubmissionResult,
+  OnlineExtractionRulePackage,
+  OnlineExtractionRuleSettings,
+  OnlineExtractionRuleSubmissionOptions,
   PackageProjectInput,
   PackageProjectResult,
+  PatchProgress,
   PatchPreview,
   PreviewStatus,
   ProgramAiIoEvent,
@@ -48,7 +62,11 @@ import {
   ProjectConfig,
   ProviderConfig,
   ResourceTableType,
-  TextItem
+  TextItem,
+  WebGameDownloadEvent,
+  WebGameDownloadInput,
+  WebGameDownloadProgress,
+  WebGameDownloadResult
 } from "../shared/types";
 
 const api = {
@@ -85,20 +103,22 @@ const api = {
     ipcRenderer.on("ai-program:io", wrapped);
     return () => ipcRenderer.removeListener("ai-program:io", wrapped);
   },
+  listProgramAiIo: (): Promise<ProgramAiIoEvent[]> => ipcRenderer.invoke("ai-program:list-io"),
   loadPrompts: (scope: PromptScope): Promise<PromptConfig> => ipcRenderer.invoke("prompts:load", scope),
   savePrompts: (scope: PromptScope, prompts: PromptConfig): Promise<PromptConfig> => ipcRenderer.invoke("prompts:save", scope, prompts),
   loadDefaultPrompts: (): Promise<PromptConfig> => ipcRenderer.invoke("prompts:defaults"),
   loadEffectivePrompts: (): Promise<PromptConfig> => ipcRenderer.invoke("prompts:effective"),
-  downloadItchHtml5Game: (input: ItchDownloadInput): Promise<ItchDownloadResult> => ipcRenderer.invoke("tools:itch:downloadHtml5", input),
-  onItchDownloadLog: (listener: (event: ItchDownloadEvent) => void): (() => void) => {
-    const wrapped = (_event: Electron.IpcRendererEvent, logEvent: ItchDownloadEvent) => listener(logEvent);
-    ipcRenderer.on("tools:itch:log", wrapped);
-    return () => ipcRenderer.removeListener("tools:itch:log", wrapped);
+  downloadWebGame: (input: WebGameDownloadInput): Promise<WebGameDownloadResult> => ipcRenderer.invoke("tools:webGame:download", input),
+  validateWebGameOutputDirectory: (outputPath: string): Promise<string[]> => ipcRenderer.invoke("tools:webGame:validateOutput", outputPath),
+  onWebGameDownloadLog: (listener: (event: WebGameDownloadEvent) => void): (() => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, logEvent: WebGameDownloadEvent) => listener(logEvent);
+    ipcRenderer.on("tools:webGame:log", wrapped);
+    return () => ipcRenderer.removeListener("tools:webGame:log", wrapped);
   },
-  onItchDownloadProgress: (listener: (progress: ItchDownloadProgress) => void): (() => void) => {
-    const wrapped = (_event: Electron.IpcRendererEvent, progress: ItchDownloadProgress) => listener(progress);
-    ipcRenderer.on("tools:itch:progress", wrapped);
-    return () => ipcRenderer.removeListener("tools:itch:progress", wrapped);
+  onWebGameDownloadProgress: (listener: (progress: WebGameDownloadProgress) => void): (() => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, progress: WebGameDownloadProgress) => listener(progress);
+    ipcRenderer.on("tools:webGame:progress", wrapped);
+    return () => ipcRenderer.removeListener("tools:webGame:progress", wrapped);
   },
   downloadAaOnlineGame: (input: AaOfflineDownloadInput): Promise<AaOfflineDownloadResult> => ipcRenderer.invoke("tools:aaoffline:download", input),
   validateAaOfflineOutputDirectory: (outputPath: string): Promise<string[]> => ipcRenderer.invoke("tools:aaoffline:validateOutput", outputPath),
@@ -107,9 +127,39 @@ const api = {
     ipcRenderer.on("tools:aaoffline:log", wrapped);
     return () => ipcRenderer.removeListener("tools:aaoffline:log", wrapped);
   },
-  extractTexts: (): Promise<AppStateSnapshot> => ipcRenderer.invoke("extract:start"),
-  generateAiLocalizationPlan: (provider: ProviderConfig): Promise<AppStateSnapshot> => ipcRenderer.invoke("extract:aiPlan", provider),
-  extractTextsWithAiPlan: (): Promise<AppStateSnapshot> => ipcRenderer.invoke("extract:ai"),
+  scanExtractionRules: (): Promise<ExtractionRuleScanResult> => ipcRenderer.invoke("extractionRules:scan"),
+  onExtractionScanProgress: (listener: (progress: ExtractionScanProgress) => void): (() => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, progress: ExtractionScanProgress) => listener(progress);
+    ipcRenderer.on("extractionRules:scanProgress", wrapped);
+    return () => ipcRenderer.removeListener("extractionRules:scanProgress", wrapped);
+  },
+  onExtractionAiReviewProgress: (listener: (progress: ExtractionAiReviewProgress) => void): (() => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, progress: ExtractionAiReviewProgress) => listener(progress);
+    ipcRenderer.on("extractionRules:aiReviewProgress", wrapped);
+    return () => ipcRenderer.removeListener("extractionRules:aiReviewProgress", wrapped);
+  },
+  listExtractionCandidates: (): Promise<ExtractionCandidate[]> => ipcRenderer.invoke("extractionRules:listCandidates"),
+  listExtractionRuleGroups: (): Promise<ExtractionRuleGroup[]> => ipcRenderer.invoke("extractionRules:listGroups"),
+  listConfirmedExtractionRules: (): Promise<ExtractionRulesFile> => ipcRenderer.invoke("extractionRules:listRules"),
+  reviewExtractionRulesWithAi: (provider: ProviderConfig, options?: { decisions?: ExtractionDecision[] }): Promise<ExtractionRuleGroup[]> =>
+    ipcRenderer.invoke("extractionRules:reviewWithAi", provider, options),
+  saveExtractionRuleDecisions: (updates: Array<{ groupId: string; decision: ExtractionDecision; note?: string }>): Promise<ExtractionRuleGroup[]> =>
+    ipcRenderer.invoke("extractionRules:saveDecisions", updates),
+  materializeExtractionTextItems: (): Promise<AppStateSnapshot> => ipcRenderer.invoke("extractionRules:materializeTextItems"),
+  createProjectExtractionRulePackage: (displayName?: string): Promise<ExtractionRulePackage> => ipcRenderer.invoke("extractionRules:createProjectPackage", displayName),
+  listExtractionRulePackages: (): Promise<ExtractionRulePackageSummary[]> => ipcRenderer.invoke("extractionRulePackages:list"),
+  loadExtractionRulePackage: (scope: ExtractionRuleScope, id: string, fileName?: string): Promise<ExtractionRulePackage> =>
+    ipcRenderer.invoke("extractionRulePackages:load", scope, id, fileName),
+  saveExtractionRulePackage: (scope: ExtractionRuleScope, pkg: ExtractionRulePackage, fileName?: string): Promise<ExtractionRulePackage> =>
+    ipcRenderer.invoke("extractionRulePackages:save", scope, pkg, fileName),
+  deleteExtractionRulePackage: (scope: ExtractionRuleScope, id: string, fileName?: string): Promise<void> =>
+    ipcRenderer.invoke("extractionRulePackages:delete", scope, id, fileName),
+  importExtractionRulePackage: (scope: ExtractionRuleScope, conflictMode?: "overwrite" | "newId", pendingPackage?: ExtractionRulePackage): Promise<ExtractionRulePackageImportResult> =>
+    ipcRenderer.invoke("extractionRulePackages:import", scope, conflictMode, pendingPackage),
+  exportExtractionRulePackage: (pkg: ExtractionRulePackage): Promise<string | null> => ipcRenderer.invoke("extractionRulePackages:export", pkg),
+  dryRunExtractionRulePackage: (pkg: ExtractionRulePackage): Promise<ExtractionRulePackageDryRunResult> => ipcRenderer.invoke("extractionRulePackages:dryRun", pkg),
+  applyExtractionRulePackageToProject: (pkg: ExtractionRulePackage): Promise<ExtractionRulePackage> => ipcRenderer.invoke("extractionRulePackages:applyToProject", pkg),
+  copyExtractionRulePackageToGlobal: (pkg: ExtractionRulePackage): Promise<ExtractionRulePackage> => ipcRenderer.invoke("extractionRulePackages:copyToGlobal", pkg),
   saveTextItems: (items: TextItem[]): Promise<TextItem[]> => ipcRenderer.invoke("items:save", items),
   exportTextItems: (items: TextItem[], format: "jsonl" | "csv"): Promise<string | null> => ipcRenderer.invoke("items:export", items, format),
   importTextItems: (): Promise<TextItem[]> => ipcRenderer.invoke("items:import"),
@@ -152,15 +202,40 @@ const api = {
     ipcRenderer.invoke("online-dictionaries:export-submission-package", table, options),
   buildOnlineDictionaryInlineSubmission: (table: DictionaryTable, options: OnlineDictionarySubmissionOptions): Promise<OnlineDictionaryInlineSubmissionResult> =>
     ipcRenderer.invoke("online-dictionaries:inline-submission", table, options),
+  listOnlineExtractionRuleSources: (): Promise<OnlineExtractionRuleSettings> => ipcRenderer.invoke("online-extraction-rules:list-sources"),
+  saveOnlineExtractionRuleSources: (settings: OnlineExtractionRuleSettings): Promise<OnlineExtractionRuleSettings> =>
+    ipcRenderer.invoke("online-extraction-rules:save-sources", settings),
+  getOnlineExtractionRuleTokenStatus: (): Promise<OnlineDictionaryTokenStatus> => ipcRenderer.invoke("online-extraction-rules:token-status"),
+  saveOnlineExtractionRuleToken: (token: string): Promise<OnlineDictionaryTokenStatus> => ipcRenderer.invoke("online-extraction-rules:save-token", token),
+  testOnlineExtractionRuleSource: (sourceId: string): Promise<OnlineDictionaryConnectionTest> => ipcRenderer.invoke("online-extraction-rules:test-source", sourceId),
+  listOnlineExtractionRulePackages: (sourceId: string, webSearchQuery?: string, page?: number, mineOnly?: boolean): Promise<OnlineExtractionRuleListResult> =>
+    ipcRenderer.invoke("online-extraction-rules:list-packages", sourceId, webSearchQuery, page, mineOnly),
+  loadOnlineExtractionRulePackage: (sourceId: string, discussionId: string): Promise<OnlineExtractionRulePackage> =>
+    ipcRenderer.invoke("online-extraction-rules:load-package", sourceId, discussionId),
+  importOnlineExtractionRulePackage: (sourceId: string, discussionId: string): Promise<ExtractionRulePackage> =>
+    ipcRenderer.invoke("online-extraction-rules:import-package", sourceId, discussionId),
+  publishOnlineExtractionRulePackage: (pkg: ExtractionRulePackage, options: OnlineExtractionRuleSubmissionOptions): Promise<{ id: string; number: number; url: string; revision?: number; sha256?: string; mode?: string }> =>
+    ipcRenderer.invoke("online-extraction-rules:publish-package", pkg, options),
+  updateOnlineExtractionRulePackage: (pkg: ExtractionRulePackage, options: OnlineExtractionRuleSubmissionOptions & { discussionId: string; expectedRevision?: number }): Promise<{ url: string; discussionId: string; discussionNumber: number; revision: number; sha256?: string; mode?: string }> =>
+    ipcRenderer.invoke("online-extraction-rules:update-package", pkg, options),
+  deleteOnlineExtractionRulePackage: (sourceId: string, discussionId: string): Promise<{ clearedLocalLinks: number }> =>
+    ipcRenderer.invoke("online-extraction-rules:delete-package", sourceId, discussionId),
+  buildOnlineExtractionRuleInlineSubmission: (pkg: ExtractionRulePackage, options: OnlineExtractionRuleSubmissionOptions): Promise<OnlineExtractionRuleInlineSubmissionResult> =>
+    ipcRenderer.invoke("online-extraction-rules:inline-submission", pkg, options),
   translate: (provider: ProviderConfig, targetLanguage: string): Promise<TextItem[]> =>
     ipcRenderer.invoke("translation:start", provider, targetLanguage),
-  translateBatch: (provider: ProviderConfig, targetLanguage: string, items: TextItem[]): Promise<TextItem[]> =>
-    ipcRenderer.invoke("translation:batch", provider, targetLanguage, items),
+  translateBatch: (provider: ProviderConfig, targetLanguage: string, items: TextItem[], options?: { titlePrefix?: string; batchIndexOffset?: number; batchTotal?: number }): Promise<TextItem[]> =>
+    ipcRenderer.invoke("translation:batch", provider, targetLanguage, items, options),
   proofread: (items: TextItem[], analysis: AnalysisResult, options: ProofreadOptions): Promise<ProofreadIssue[]> =>
     ipcRenderer.invoke("proofread:start", items, analysis, options),
-  aiProofread: (provider: ProviderConfig, issues: ProofreadIssue[]): Promise<TextItem[]> =>
-    ipcRenderer.invoke("proofread:ai", provider, issues),
+  aiProofread: (provider: ProviderConfig, issues: ProofreadIssue[], options?: { titlePrefix?: string; batchIndexOffset?: number; batchTotal?: number }): Promise<TextItem[]> =>
+    ipcRenderer.invoke("proofread:ai", provider, issues, options),
   previewPatch: (items: TextItem[]): Promise<PatchPreview> => ipcRenderer.invoke("patch:preview", items),
+  onPatchProgress: (listener: (progress: PatchProgress) => void): (() => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, progress: PatchProgress) => listener(progress);
+    ipcRenderer.on("patch:progress", wrapped);
+    return () => ipcRenderer.removeListener("patch:progress", wrapped);
+  },
   applyPatch: (items: TextItem[]): Promise<PatchPreview> => ipcRenderer.invoke("patch:apply", items),
   applyAiPatch: (items: TextItem[]): Promise<PatchPreview> => ipcRenderer.invoke("patch:aiApply", items),
   restoreGame: (): Promise<AppStateSnapshot> => ipcRenderer.invoke("patch:restore"),

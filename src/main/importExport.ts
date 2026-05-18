@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { dialog } from "electron";
 import { ProjectConfig, TextItem } from "../shared/types";
-import { projectDirs, projectPaths, readJsonl, sha256, writeJsonl } from "./storage";
+import { compactTextItems, projectDirs, projectPaths, readJsonl, sha256, writeJsonl } from "./storage";
 
 export async function exportTextItems(project: ProjectConfig, items: TextItem[], format: "jsonl" | "csv"): Promise<string | null> {
   const result = await dialog.showSaveDialog({
@@ -10,10 +10,11 @@ export async function exportTextItems(project: ProjectConfig, items: TextItem[],
     filters: [{ name: format.toUpperCase(), extensions: [format] }]
   });
   if (result.canceled || !result.filePath) return null;
+  const compacted = compactTextItems(items);
   if (format === "jsonl") {
-    await writeJsonl(result.filePath, items);
+    await writeJsonl(result.filePath, compacted);
   } else {
-    await fs.writeFile(result.filePath, toCsv(items), "utf8");
+    await fs.writeFile(result.filePath, toCsv(compacted), "utf8");
   }
   return result.filePath;
 }
@@ -26,7 +27,7 @@ export async function importTextItems(project: ProjectConfig): Promise<TextItem[
       { name: "All files", extensions: ["*"] }
     ]
   });
-  if (result.canceled) return readJsonl<TextItem>(projectPaths(project).textItems);
+  if (result.canceled) return compactTextItems(await readJsonl<TextItem>(projectPaths(project).textItems));
   const filePath = result.filePaths[0];
   const current = await readJsonl<TextItem>(projectPaths(project).textItems);
   const incoming = filePath.toLowerCase().endsWith(".csv") ? await fromCsv(filePath) : await readJsonl<Partial<TextItem>>(filePath);
@@ -40,8 +41,9 @@ export async function importTextItems(project: ProjectConfig): Promise<TextItem[
       match.status = match.translation ? "translated" : match.status;
     }
   }
-  await writeJsonl(projectPaths(project).textItems, current);
-  return current;
+  const compacted = compactTextItems(current);
+  await writeJsonl(projectPaths(project).textItems, compacted);
+  return compacted;
 }
 
 function toCsv(items: TextItem[]): string {

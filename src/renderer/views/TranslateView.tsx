@@ -2,6 +2,7 @@
 import { Play } from "lucide-react";
 import type { AiBalanceSnapshot, AppStateSnapshot, ProviderConfig } from "../../shared/types";
 import { TextTable, type TableSettings } from "../components/table/DataTable";
+import { BatchProgressDialog, type BatchProgressState } from "../components/ui/BatchProgressDialog";
 import { ProgressBar } from "../components/ui/Primitives";
 import { chunk, formatDeepSeekBalance, replaceItem } from "../appUtils";
 import { defaultParallelBatchLimit } from "../settingsModel";
@@ -27,6 +28,7 @@ export default function TranslateView({
   tableSettings: TableSettings;
 }) {
   const [translationProgress, setTranslationProgress] = useState({ running: false, processed: 0, translated: 0, total: 0 });
+  const [selectionProgress, setSelectionProgress] = useState<BatchProgressState | null>(null);
   const translatedCount = snapshot.textItems.filter((item) => item.translation.trim() && item.status !== "excluded").length;
   const translationModelLabel = provider ? `${provider.displayName || provider.model} / ${provider.model}` : "未配置模型";
   const translationBalanceLabel =
@@ -62,7 +64,11 @@ export default function TranslateView({
 
       const runBatch = async (index: number) => {
         const batch = batches[index];
-        const translatedBatch = await window.bgt.translateBatch(provider, project.targetLanguage, batch);
+        const translatedBatch = await window.bgt.translateBatch(provider, project.targetLanguage, batch, {
+          titlePrefix: "AI 翻译",
+          batchIndexOffset: index,
+          batchTotal: batches.length
+        });
         const byId = new Map(translatedBatch.map((item) => [item.id, item]));
         workingItems = workingItems.map((item) => byId.get(item.id) ?? item);
         await window.bgt.saveTextItems(workingItems);
@@ -100,6 +106,58 @@ export default function TranslateView({
     }
   };
 
+  const translateSelectedItems = async (selectedItems: AppStateSnapshot["textItems"]) => {
+    if (!provider) return;
+    const activeItems = selectedItems.filter((item) => item.status !== "excluded");
+    const batches = chunk(activeItems, 20);
+    if (!batches.length) return;
+    const targetLanguage = snapshot.project?.targetLanguage ?? "zh-CN";
+    if (batches.length === 1) {
+      const translated = await window.bgt.translateBatch(provider, targetLanguage, activeItems);
+      const byId = new Map(translated.map((item) => [item.id, item]));
+      const nextItems = snapshotRef.current.textItems.map((item) => byId.get(item.id) ?? item);
+      const saved = await window.bgt.saveTextItems(nextItems);
+      setSnapshot((state) => ({ ...state, textItems: saved }));
+      return;
+    }
+
+    let workingItems = snapshotRef.current.textItems;
+    let processed = 0;
+    try {
+      for (const [index, batch] of batches.entries()) {
+        setSelectionProgress({
+          title: "翻译选中行",
+          currentLabel: `正在翻译 ${batch.length} 行`,
+          processed,
+          total: activeItems.length,
+          batchIndex: index + 1,
+          batchTotal: batches.length
+        });
+        const translated = await window.bgt.translateBatch(provider, targetLanguage, batch, {
+          titlePrefix: `AI 翻译选中行（${activeItems.length} 行） `,
+          batchIndexOffset: index,
+          batchTotal: batches.length
+        });
+        const byId = new Map(translated.map((item) => [item.id, item]));
+        workingItems = workingItems.map((item) => byId.get(item.id) ?? item);
+        const saved = await window.bgt.saveTextItems(workingItems);
+        workingItems = saved;
+        setSnapshot((state) => ({ ...state, textItems: saved }));
+        processed += batch.length;
+        setSelectionProgress({
+          title: "翻译选中行",
+          currentLabel: `已完成 ${processed}/${activeItems.length} 行`,
+          processed,
+          total: activeItems.length,
+          batchIndex: index + 1,
+          batchTotal: batches.length
+        });
+      }
+    } finally {
+      setSelectionProgress(null);
+    }
+  };
+
   return (
     <div className="stack">
       <div className="toolbar translation-toolbar">
@@ -125,15 +183,12 @@ export default function TranslateView({
         onTranslateItems={
           provider
             ? async (selectedItems) => {
-                const translated = await window.bgt.translateBatch(provider, snapshot.project?.targetLanguage ?? "zh-CN", selectedItems);
-                const byId = new Map(translated.map((item) => [item.id, item]));
-                const nextItems = snapshotRef.current.textItems.map((item) => byId.get(item.id) ?? item);
-                const saved = await window.bgt.saveTextItems(nextItems);
-                setSnapshot((state) => ({ ...state, textItems: saved }));
+                await run("翻译选中行", () => translateSelectedItems(selectedItems));
               }
             : undefined
         }
       />
+      {selectionProgress ? <BatchProgressDialog progress={selectionProgress} /> : null}
     </div>
   );
 }

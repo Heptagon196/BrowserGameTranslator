@@ -2,7 +2,7 @@
   "name": "browser-game-translator",
   "version": "0.1.0",
   "private": true,
-  "description": "Desktop AI translation tool for offline browser games.",
+  "description": "Browser game localization",
   "main": "dist/main/main.js",
   "scripts": {
     "predev": "tsc -p tsconfig.main.json",
@@ -10,6 +10,7 @@
     "build:icon": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/generate-icons.ps1",
     "build:launcher": "node scripts/build-launcher.cjs",
     "build": "tsc -p tsconfig.main.json && vite build",
+    "package:portable": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false ELECTRON_CACHE=.cache/electron ELECTRON_BUILDER_CACHE=.cache/electron-builder electron-builder --win zip --x64",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.main.json",
     "lint": "eslint src --max-warnings 0",
     "check:unused": "tsc --noEmit -p tsconfig.unused.json",
@@ -45,10 +46,9 @@
     "@tanstack/react-virtual": "^3.13.24",
     "@vitejs/plugin-react": "^5.0.0",
     "7zip-min": "^3.0.1",
+    "acorn": "^8.16.0",
     "cmdk": "^1.1.1",
-    "electron": "^42.0.0",
     "font-list": "^2.0.2",
-    "itchio-downloader": "^1.2.0",
     "jsdom": "^29.1.1",
     "lucide-react": "^0.468.0",
     "open-websearch": "^2.1.10",
@@ -72,6 +72,8 @@
     "@types/turndown": "^5.0.6",
     "concurrently": "^9.1.0",
     "cross-env": "^7.0.3",
+    "electron": "^42.0.0",
+    "electron-builder": "^26.8.1",
     "eslint": "^10.3.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
@@ -79,5 +81,36 @@
     "typescript-eslint": "^8.59.2",
     "vite": "^6.0.5",
     "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.browsergametranslator.app",
+    "productName": "BrowserGameTranslator",
+    "electronDist": "node_modules/electron/dist",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "resources"
+      }
+    ],
+    "win": {
+      "icon": "resources/icon/app.ico",
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "artifactName": "${productName}-${version}-${os}-${arch}-portable.${ext}"
   }
 }

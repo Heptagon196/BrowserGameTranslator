@@ -36,6 +36,7 @@ export async function ensureProjectDirs(project: ProjectConfig): Promise<void> {
   await Promise.all([
     fs.mkdir(dirs.originalRoot, { recursive: true }),
     fs.mkdir(path.join(dirs.bgtRoot, "extracted"), { recursive: true }),
+    fs.mkdir(path.join(dirs.bgtRoot, "extraction-rules"), { recursive: true }),
     fs.mkdir(path.join(dirs.bgtRoot, "resources"), { recursive: true }),
     fs.mkdir(path.join(dirs.bgtRoot, "dictionaries"), { recursive: true }),
     fs.mkdir(path.join(dirs.bgtRoot, "translations"), { recursive: true }),
@@ -120,6 +121,21 @@ export async function writeJsonl<T>(filePath: string, rows: T[]): Promise<void> 
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const body = rows.map((row) => JSON.stringify(row)).join("\n");
   await fs.writeFile(filePath, body ? `${body}\n` : "", "utf8");
+}
+
+export function compactTextItem(item: TextItem): TextItem {
+  return {
+    id: String(item.id),
+    sourceFile: String(item.sourceFile),
+    locator: String(item.locator),
+    original: String(item.original),
+    translation: String(item.translation ?? ""),
+    status: item.status
+  };
+}
+
+export function compactTextItems(items: TextItem[]): TextItem[] {
+  return items.map(compactTextItem);
 }
 
 function isResourceTableMeta(value: unknown): value is DictionaryTableMeta {
@@ -211,7 +227,7 @@ export async function loadSnapshot(project: ProjectConfig): Promise<AppStateSnap
     activeProviderId: "deepseek-main",
     activeChatProviderId: "deepseek-main",
     recentProjects: [],
-    textItems: await readJsonl<TextItem>(paths.textItems),
+    textItems: compactTextItems(await readJsonl<TextItem>(paths.textItems)),
     scanReport: await readJson<ScanReport | null>(paths.scanReport, null),
     aiLocalizationPlan: await readJson<AiLocalizationPlan | null>(paths.aiLocalizationPlan, null),
     analysis,

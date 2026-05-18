@@ -58,16 +58,21 @@ const commentPartLimit = 50000;
 const attachmentUrlPlaceholder = "PASTE_GITHUB_ATTACHMENT_URL_HERE";
 const compressedEncoding = "base64" as const;
 const compressedFormat = "gzip" as const;
+const dictionaryDefaultCategory = "词典";
+const extractionRuleDefaultCategory = "提取规则";
 const defaultSource: OnlineDictionarySource = {
   id: "official",
   displayName: "默认源",
   url: "https://github.com/Heptagon196/BrowserGameTranslator",
   owner: "Heptagon196",
   repo: "BrowserGameTranslator",
-  category: "词典",
+  dictionaryCategory: dictionaryDefaultCategory,
+  extractionRuleCategory: extractionRuleDefaultCategory,
   enabled: true,
   readonly: true
 };
+
+type OnlineDictionaryDiscussionSource = OnlineDictionarySource & { discussionCategory: string };
 
 const tableTypeLabels: Record<OnlineDictionaryMeta["tableType"], string> = {
   characters: "人物表",
@@ -75,14 +80,14 @@ const tableTypeLabels: Record<OnlineDictionaryMeta["tableType"], string> = {
   noTranslate: "禁翻表"
 };
 
-const githubDiscussions = createGitHubDiscussionStore<OnlineDictionarySource>({
+const githubDiscussions = createGitHubDiscussionStore<OnlineDictionaryDiscussionSource>({
   settingsFileName: "online-dictionaries.json",
   tokenFileName: "online-dictionary-secrets.json",
-  defaultSource,
-  defaultCategory: "词典",
+  defaultSource: toDictionaryDiscussionSource(defaultSource),
+  defaultCategory: dictionaryDefaultCategory,
   tokenRequiredMessage: "自动上传词典需要 GitHub API Token。",
-  publicConnectionMessage: (source) => `已连接公开分类 ${source.owner}/${source.repo}/${source.category}。未使用 GitHub API Token。`,
-  tokenConnectionMessage: (source, categoryId) => `已连接 ${source.owner}/${source.repo}，找到分类 ${source.category}。${categoryId}`
+  publicConnectionMessage: (source) => `已连接公开分类 ${source.owner}/${source.repo}/${source.discussionCategory}。未使用 GitHub API Token。`,
+  tokenConnectionMessage: (source, categoryId) => `已连接 ${source.owner}/${source.repo}，找到分类 ${source.discussionCategory}。${categoryId}`
 });
 
 function settingsPath(): string {
@@ -94,11 +99,19 @@ function tokenPath(): string {
 }
 
 export async function listOnlineDictionarySources(): Promise<OnlineDictionarySettings> {
-  return githubDiscussions.listSources();
+  const saved = await readJson<Partial<OnlineDictionarySettings>>(settingsPath(), {
+    schemaVersion: 1,
+    sources: [defaultSource],
+    useToken: true
+  });
+  const savedSources = saved.sources?.length ? saved.sources : [defaultSource];
+  return { schemaVersion: 1, sources: normalizeSources(savedSources), useToken: saved.useToken !== false };
 }
 
 export async function saveOnlineDictionarySources(settings: OnlineDictionarySettings): Promise<OnlineDictionarySettings> {
-  return githubDiscussions.saveSources(settings);
+  const next = { schemaVersion: 1 as const, sources: normalizeSources(settings.sources), useToken: settings.useToken !== false };
+  await writeJson(settingsPath(), next);
+  return next;
 }
 
 export async function getOnlineDictionaryTokenStatus(): Promise<OnlineDictionaryTokenStatus> {
@@ -110,7 +123,18 @@ export async function saveOnlineDictionaryToken(token: string): Promise<OnlineDi
 }
 
 export async function testOnlineDictionarySource(sourceId: string): Promise<OnlineDictionaryConnectionTest> {
-  return githubDiscussions.testSource(sourceId);
+  try {
+    const source = await requireSource(sourceId);
+    if (!(await loadToken()).trim()) {
+      const categoryUrl = `https://github.com/${source.owner}/${source.repo}/discussions/categories/${encodeURIComponent(source.discussionCategory)}`;
+      await fetchGitHubText(categoryUrl);
+      return { ok: true, message: `已连接公开分类 ${source.owner}/${source.repo}/${source.discussionCategory}。未使用 GitHub API Token。` };
+    }
+    const categoryId = await findCategoryId(source);
+    return { ok: true, message: `已连接 ${source.owner}/${source.repo}，找到分类 ${source.discussionCategory}。${categoryId}` };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export async function listOnlineDictionaryTables(sourceId: string, webSearchQuery = "", page = 1, mineOnly = false): Promise<OnlineDictionaryListResult> {
@@ -120,7 +144,7 @@ export async function listOnlineDictionaryTables(sourceId: string, webSearchQuer
   return listPublicOnlineDictionaryTables(source, webSearchQuery, page);
 }
 
-async function searchOnlineDictionaryTables(source: OnlineDictionarySource, webSearchQuery = "", page = 1, mineOnly = false): Promise<OnlineDictionaryListResult> {
+async function searchOnlineDictionaryTables(source: OnlineDictionaryDiscussionSource, webSearchQuery = "", page = 1, mineOnly = false): Promise<OnlineDictionaryListResult> {
   const result = await githubDiscussions.searchDiscussionNodes(source, webSearchQuery, page, mineOnly);
   return {
     summaries: result.nodes
@@ -155,15 +179,16 @@ export async function loadOnlineDictionaryTableByUrl(url: string): Promise<Onlin
   const configuredSource = (await listOnlineDictionarySources()).sources.find((source) =>
     source.owner.toLowerCase() === parsed.owner.toLowerCase() && source.repo.toLowerCase() === parsed.repo.toLowerCase()
   );
-  const source: OnlineDictionarySource = configuredSource ?? {
+  const source = toDictionaryDiscussionSource(configuredSource ?? {
     id: `link:${parsed.owner}/${parsed.repo}`,
     displayName: `${parsed.owner}/${parsed.repo}`,
     url: `https://github.com/${parsed.owner}/${parsed.repo}`,
     owner: parsed.owner,
     repo: parsed.repo,
-    category: "词典",
+    dictionaryCategory: dictionaryDefaultCategory,
+    extractionRuleCategory: extractionRuleDefaultCategory,
     enabled: true
-  };
+  });
   if ((await loadToken()).trim()) {
     const node = await loadDiscussionNodeByRepositoryNumber(source, parsed.number);
     const summary = parseDiscussionSummary(source.id, node);
@@ -841,11 +866,11 @@ function parseRows(jsonl: string, summary: OnlineDictionarySummary): DictionaryT
   return rows as unknown as DictionaryTableRows;
 }
 
-async function listPublicOnlineDictionaryTables(source: OnlineDictionarySource, webSearchQuery = "", page = 1): Promise<OnlineDictionaryListResult> {
-  const baseUrl = `https://github.com/${source.owner}/${source.repo}/discussions/categories/${encodeURIComponent(source.category)}`;
+async function listPublicOnlineDictionaryTables(source: OnlineDictionaryDiscussionSource, webSearchQuery = "", page = 1): Promise<OnlineDictionaryListResult> {
+  const baseUrl = `https://github.com/${source.owner}/${source.repo}/discussions/categories/${encodeURIComponent(source.discussionCategory)}`;
   const query = webSearchQuery.trim();
   const safePage = Math.max(1, Math.floor(page));
-  const categoryUrl = buildDiscussionCategorySearchUrl(baseUrl, source.category, query, safePage);
+  const categoryUrl = buildDiscussionCategorySearchUrl(baseUrl, source.discussionCategory, query, safePage);
   const html = await fetchText(categoryUrl);
   const dom = new JSDOM(html);
   const links = Array.from(dom.window.document.querySelectorAll("a.markdown-title[href]"))
@@ -882,7 +907,7 @@ function buildDiscussionCategorySearchUrl(baseUrl: string, category: string, que
   return url.toString();
 }
 
-function publicSummaryFromTitleLink(source: OnlineDictionarySource, link: Element): OnlineDictionarySummary | null {
+function publicSummaryFromTitleLink(source: OnlineDictionaryDiscussionSource, link: Element): OnlineDictionarySummary | null {
   const href = link.getAttribute("href") ?? "";
   const match = href.match(new RegExp(`^/${escapeRegExp(source.owner)}/${escapeRegExp(source.repo)}/discussions/(\\d+)$`, "i"));
   if (!match) return null;
@@ -952,7 +977,7 @@ function tableTypeFromLabel(label: string): OnlineDictionaryMeta["tableType"] | 
   return (Object.entries(tableTypeLabels).find(([, value]) => value === trimmed)?.[0] as OnlineDictionaryMeta["tableType"] | undefined) ?? null;
 }
 
-async function loadPublicDiscussionNode(source: OnlineDictionarySource, number: number): Promise<GitHubDiscussionNode> {
+async function loadPublicDiscussionNode(source: OnlineDictionaryDiscussionSource, number: number): Promise<GitHubDiscussionNode> {
   const url = `https://github.com/${source.owner}/${source.repo}/discussions/${number}`;
   const html = await fetchText(url);
   const dom = new JSDOM(html);
@@ -1098,10 +1123,10 @@ function commentsByPartIndex(comments: string[]): Map<string, string> {
   return discussionCommentsByPartIndex(comments, "bgt-dictionary");
 }
 
-function buildGraphqlDiscussionSearchQuery(source: OnlineDictionarySource, webSearchQuery: string, author: string): string {
+function buildGraphqlDiscussionSearchQuery(source: OnlineDictionaryDiscussionSource, webSearchQuery: string, author: string): string {
   return [
     `repo:${source.owner}/${source.repo}`,
-    `category:${quoteSearchToken(source.category)}`,
+    `category:${quoteSearchToken(source.discussionCategory)}`,
     author ? `author:${author}` : "",
     webSearchQuery.trim()
   ].filter(Boolean).join(" ");
@@ -1236,7 +1261,7 @@ async function loadDiscussionNode(discussionId: string): Promise<GitHubDiscussio
   return githubDiscussions.loadDiscussionNode(discussionId);
 }
 
-async function loadDiscussionNodeByRepositoryNumber(source: OnlineDictionarySource, number: number): Promise<GitHubDiscussionNode> {
+async function loadDiscussionNodeByRepositoryNumber(source: OnlineDictionaryDiscussionSource, number: number): Promise<GitHubDiscussionNode> {
   return githubDiscussions.loadDiscussionNodeByRepositoryNumber(source, number);
 }
 
@@ -1244,15 +1269,15 @@ async function loadDiscussionComments(ids: string[]): Promise<Map<string, string
   return githubDiscussions.loadDiscussionComments(ids);
 }
 
-async function findCategoryId(source: OnlineDictionarySource): Promise<string> {
+async function findCategoryId(source: OnlineDictionaryDiscussionSource): Promise<string> {
   return githubDiscussions.findCategoryId(source);
 }
 
-async function loadRepositoryPublishInfo(source: OnlineDictionarySource): Promise<{ repositoryId: string; categoryId: string }> {
+async function loadRepositoryPublishInfo(source: OnlineDictionaryDiscussionSource): Promise<{ repositoryId: string; categoryId: string }> {
   return githubDiscussions.loadRepositoryPublishInfo(source);
 }
 
-async function assertNoRemoteConflict(source: OnlineDictionarySource, tableId: string, title: string): Promise<void> {
+async function assertNoRemoteConflict(source: OnlineDictionaryDiscussionSource, tableId: string, title: string): Promise<void> {
   const existing = (await listOnlineDictionaryTables(source.id)).summaries;
   const idConflict = existing.find((item) => item.meta.id === tableId);
   if (idConflict) throw new Error(`远程词典已存在同 ID 表：${idConflict.meta.displayName}`);
@@ -1300,16 +1325,39 @@ async function shouldUseToken(): Promise<boolean> {
   return githubDiscussions.shouldUseToken();
 }
 
-async function requireSource(sourceId: string): Promise<OnlineDictionarySource> {
-  return githubDiscussions.requireSource(sourceId);
+async function requireSource(sourceId: string): Promise<OnlineDictionaryDiscussionSource> {
+  const settings = await listOnlineDictionarySources();
+  const source = settings.sources.find((item) => item.id === sourceId);
+  if (!source) throw new Error("找不到在线仓库。");
+  return toDictionaryDiscussionSource(source);
 }
 
 function normalizeSource(source: OnlineDictionarySource): OnlineDictionarySource {
-  return githubDiscussions.normalizeSource(source);
+  if (source.id === defaultSource.id) return defaultSource;
+  const parsed = parseGitHubRepositoryLink(source.url);
+  const owner = parsed.owner || source.owner;
+  const repo = parsed.repo || source.repo;
+  return {
+    ...source,
+    id: source.id.trim() || `source_${Date.now()}`,
+    displayName: source.displayName.trim() || `${owner}/${repo}`,
+    url: `https://github.com/${owner}/${repo}`,
+    owner,
+    repo,
+    dictionaryCategory: (source.dictionaryCategory ?? "").trim() || dictionaryDefaultCategory,
+    extractionRuleCategory: (source.extractionRuleCategory ?? "").trim() || extractionRuleDefaultCategory,
+    enabled: source.enabled !== false,
+    readonly: false
+  };
 }
 
 function normalizeSources(sources: OnlineDictionarySource[]): OnlineDictionarySource[] {
-  return githubDiscussions.normalizeSources(sources);
+  const normalized = sources.filter((source) => source.id !== defaultSource.id).map(normalizeSource);
+  return [defaultSource, ...normalized];
+}
+
+function toDictionaryDiscussionSource(source: OnlineDictionarySource): OnlineDictionaryDiscussionSource {
+  return { ...source, discussionCategory: (source.dictionaryCategory ?? "").trim() || dictionaryDefaultCategory };
 }
 
 function sanitizeFileName(value: string): string {

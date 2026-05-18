@@ -9,7 +9,7 @@ export interface GitHubDiscussionSource {
   url: string;
   owner: string;
   repo: string;
-  category: string;
+  discussionCategory: string;
   enabled: boolean;
   readonly?: boolean;
 }
@@ -81,7 +81,7 @@ export function createGitHubDiscussionStore<TSource extends GitHubDiscussionSour
       url: `https://github.com/${owner}/${repo}`,
       owner,
       repo,
-      category: source.category.trim() || config.defaultCategory,
+      discussionCategory: source.discussionCategory.trim() || config.defaultCategory,
       enabled: source.enabled !== false,
       readonly: false
     };
@@ -201,8 +201,8 @@ export function createGitHubDiscussionStore<TSource extends GitHubDiscussionSour
       { owner: source.owner, repo: source.repo }
     );
     if (!data.repository) throw new Error("GitHub 仓库不存在或无权访问。");
-    const category = data.repository.discussionCategories.nodes.find((item) => item.name === source.category || item.slug === source.category);
-    if (!category) throw new Error(`找不到 Discussions 分类：${source.category}`);
+    const category = data.repository.discussionCategories.nodes.find((item) => item.name === source.discussionCategory || item.slug === source.discussionCategory);
+    if (!category) throw new Error(`找不到 Discussions 分类：${source.discussionCategory}`);
     return category.id;
   };
 
@@ -210,12 +210,12 @@ export function createGitHubDiscussionStore<TSource extends GitHubDiscussionSour
     try {
       const source = await requireSource(sourceId);
       if (!(await loadToken()).trim()) {
-        const categoryUrl = `https://github.com/${source.owner}/${source.repo}/discussions/categories/${encodeURIComponent(source.category)}`;
+        const categoryUrl = `https://github.com/${source.owner}/${source.repo}/discussions/categories/${encodeURIComponent(source.discussionCategory)}`;
         await fetchText(categoryUrl);
-        return { ok: true, message: config.publicConnectionMessage?.(source) ?? `已连接公开分类 ${source.owner}/${source.repo}/${source.category}。未使用 GitHub API Token。` };
+        return { ok: true, message: config.publicConnectionMessage?.(source) ?? `已连接公开分类 ${source.owner}/${source.repo}/${source.discussionCategory}。未使用 GitHub API Token。` };
       }
       const categoryId = await findCategoryId(source);
-      return { ok: true, message: config.tokenConnectionMessage?.(source, categoryId) ?? `已连接 ${source.owner}/${source.repo}，找到分类 ${source.category}。${categoryId}` };
+      return { ok: true, message: config.tokenConnectionMessage?.(source, categoryId) ?? `已连接 ${source.owner}/${source.repo}，找到分类 ${source.discussionCategory}。${categoryId}` };
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) };
     }
@@ -361,8 +361,8 @@ export function createGitHubDiscussionStore<TSource extends GitHubDiscussionSour
       { owner: source.owner, repo: source.repo }
     );
     if (!data.repository) throw new Error("GitHub 仓库不存在或无权访问。");
-    const category = data.repository.discussionCategories.nodes.find((item) => item.name === source.category || item.slug === source.category);
-    if (!category) throw new Error(`找不到 Discussions 分类：${source.category}`);
+    const category = data.repository.discussionCategories.nodes.find((item) => item.name === source.discussionCategory || item.slug === source.discussionCategory);
+    if (!category) throw new Error(`找不到 Discussions 分类：${source.discussionCategory}`);
     return { repositoryId: data.repository.id, categoryId: category.id };
   };
 
@@ -513,7 +513,7 @@ export async function fetchGitHub(url: string, init?: Parameters<typeof net.fetc
 export function buildGraphqlDiscussionSearchQuery(source: GitHubDiscussionSource, webSearchQuery: string, author: string): string {
   return [
     `repo:${source.owner}/${source.repo}`,
-    `category:${quoteSearchToken(source.category)}`,
+    `category:${quoteSearchToken(source.discussionCategory)}`,
     author ? `author:${author}` : "",
     webSearchQuery.trim()
   ].filter(Boolean).join(" ");

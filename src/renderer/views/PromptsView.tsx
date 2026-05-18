@@ -22,6 +22,11 @@ const promptFields: Array<{ key: PromptEditorKey; title: string; description: st
     description: "让 AI 根据本地游戏结构生成特化提取/回填方案时使用的提示词。"
   },
   {
+    key: "aiExtractionRuleReviewSystem",
+    title: "AI 规则组评审",
+    description: "让 AI 根据规则组摘要和样例判断纳入、排除或复核。"
+  },
+  {
     key: "translationSystem",
     title: "翻译",
     description: "批量翻译时使用的提示词，约束 AI 按逐行 textarea 结构输出译文。"

@@ -238,6 +238,28 @@
   flex: 0 1 auto;
 }
 
+.character-ambiguity-button {
+  min-width: 30px;
+  padding: 0;
+  width: 30px;
+}
+
+.character-ambiguity-button.active {
+  background: #e8f1f4;
+  border-color: #8eacb5;
+  color: #315763;
+}
+
+.character-ambiguity-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.character-ambiguity-popover {
+  min-width: 142px;
+  z-index: 70;
+}
+
 .resource-table-control-actions {
   display: flex;
   flex: 0 1 auto;

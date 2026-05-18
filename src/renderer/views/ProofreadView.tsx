@@ -1,11 +1,12 @@
 import React, { useState } from "react";
-import { Languages, ListChecks, ShieldCheck, Sparkles } from "lucide-react";
+import { AlertTriangle, Languages, ListChecks, ShieldCheck, Sparkles } from "lucide-react";
 import type { AppStateSnapshot, ProofreadIssue, ProofreadOptions, ProviderConfig } from "../../shared/types";
 import { IssueTable, type TableSettings } from "../components/table/DataTable";
+import { BatchProgressDialog, type BatchProgressState } from "../components/ui/BatchProgressDialog";
 import { AppDialog, CheckboxControl } from "../components/ui/Primitives";
-import { ruleLabel } from "../appUtils";
+import { chunk, ruleLabel } from "../appUtils";
 
-type ProofreadCategory = "language" | "glossary" | "rules";
+type ProofreadCategory = "language" | "glossary" | "characterAmbiguity" | "rules";
 
 const ruleOptionKeys: Array<keyof ProofreadOptions> = [
   "untranslatedStatusCheck",
@@ -38,9 +39,10 @@ export default function ProofreadView({
 }) {
   const [dialogCategory, setDialogCategory] = useState<ProofreadCategory | null>(null);
   const [draftOptions, setDraftOptions] = useState(options);
+  const [aiProgress, setAiProgress] = useState<BatchProgressState | null>(null);
 
   const openDialog = (category: ProofreadCategory) => {
-    setDraftOptions(options);
+    setDraftOptions(category === "characterAmbiguity" ? { ...options, characterAmbiguityCheck: true } : options);
     setDialogCategory(category);
   };
 
@@ -54,8 +56,47 @@ export default function ProofreadView({
   const aiProofreadIssues = (targetIssues: ProofreadIssue[]) => {
     if (!provider || !targetIssues.length) return;
     return run("AI 自动校对", async () => {
-      const textItems = await window.bgt.aiProofread(provider, targetIssues);
-      await window.bgt.proofread(textItems, snapshot.analysis, options);
+      const issueBatches = buildAiProofreadIssueBatches(targetIssues, snapshot.textItems);
+      if (!issueBatches.length) return window.bgt.refreshProject();
+      if (issueBatches.length === 1) {
+        const textItems = await window.bgt.aiProofread(provider, targetIssues);
+        await window.bgt.proofread(textItems, snapshot.analysis, options);
+        return window.bgt.refreshProject();
+      }
+
+      const totalItemCount = issueBatches.reduce((sum, entry) => sum + uniqueTextItemCount(entry), 0);
+      let processed = 0;
+      let latestTextItems = snapshot.textItems;
+      try {
+        for (const [index, batch] of issueBatches.entries()) {
+          const batchItemCount = uniqueTextItemCount(batch);
+          setAiProgress({
+            title: "AI 自动校对",
+            currentLabel: `正在校对 ${batchItemCount} 行`,
+            processed,
+            total: totalItemCount,
+            batchIndex: index + 1,
+            batchTotal: issueBatches.length
+          });
+          latestTextItems = await window.bgt.aiProofread(provider, batch, {
+            titlePrefix: "AI 自动校对",
+            batchIndexOffset: index,
+            batchTotal: issueBatches.length
+          });
+          processed += batchItemCount;
+          setAiProgress({
+            title: "AI 自动校对",
+            currentLabel: `已完成 ${processed} 行`,
+            processed,
+            total: totalItemCount,
+            batchIndex: index + 1,
+            batchTotal: issueBatches.length
+          });
+        }
+      } finally {
+        setAiProgress(null);
+      }
+      await window.bgt.proofread(latestTextItems, snapshot.analysis, options);
       return window.bgt.refreshProject();
     }, setSnapshot);
   };
@@ -71,6 +112,10 @@ export default function ProofreadView({
           <ShieldCheck size={16} />
           术语检查
         </button>
+        <button disabled={busy || !snapshot.textItems.length} onClick={() => openDialog("characterAmbiguity")}>
+          <AlertTriangle size={16} />
+          易混淆角色名检查
+        </button>
         <button disabled={busy || !snapshot.textItems.length} onClick={() => openDialog("rules")}>
           <ListChecks size={16} />
           规则检查
@@ -81,6 +126,7 @@ export default function ProofreadView({
         </button>
       </div>
       <IssueTable issues={snapshot.issues} items={snapshot.textItems} tableSettings={tableSettings} onProofreadIssues={(rows) => { void aiProofreadIssues(rows); }} />
+      {aiProgress ? <BatchProgressDialog progress={aiProgress} /> : null}
       {dialogCategory ? (
         <ProofreadOptionsDialog
           category={dialogCategory}
@@ -93,6 +139,22 @@ export default function ProofreadView({
       ) : null}
     </div>
   );
+}
+
+function buildAiProofreadIssueBatches(issues: ProofreadIssue[], items: AppStateSnapshot["textItems"]): ProofreadIssue[][] {
+  const eligibleItemIds = new Set(items.filter((item) => item.status !== "excluded").map((item) => item.id));
+  const issuesByItemId = new Map<string, ProofreadIssue[]>();
+  for (const issue of issues) {
+    if (!eligibleItemIds.has(issue.textItemId)) continue;
+    const grouped = issuesByItemId.get(issue.textItemId) ?? [];
+    grouped.push(issue);
+    issuesByItemId.set(issue.textItemId, grouped);
+  }
+  return chunk(Array.from(issuesByItemId.keys()), 20).map((ids) => ids.flatMap((id) => issuesByItemId.get(id) ?? []));
+}
+
+function uniqueTextItemCount(issues: ProofreadIssue[]): number {
+  return new Set(issues.map((issue) => issue.textItemId)).size;
 }
 
 function ProofreadOptionsDialog({
@@ -110,7 +172,7 @@ function ProofreadOptionsDialog({
   onClose: () => void;
   onRun: () => void;
 }) {
-  const title = category === "language" ? "语言检查" : category === "glossary" ? "术语检查" : "规则检查";
+  const title = category === "language" ? "语言检查" : category === "glossary" ? "术语检查" : category === "characterAmbiguity" ? "易混淆角色名检查" : "规则检查";
   return (
     <AppDialog open title={title} compact className="proofread-options-modal" onOpenChange={(open) => { if (!open) onClose(); }}>
       <div className="proofread-dialog-body">
@@ -135,6 +197,14 @@ function ProofreadOptionsDialog({
             <label className="check-row">
               <CheckboxControl checked={options.glossaryCheck} onChange={(checked) => onChange((state) => ({ ...state, glossaryCheck: checked }))} />
               <span>{ruleLabel("glossaryCheck")}</span>
+            </label>
+          </div>
+        ) : null}
+        {category === "characterAmbiguity" ? (
+          <div className="proofread-rule-grid">
+            <label className="check-row">
+              <CheckboxControl checked={options.characterAmbiguityCheck} onChange={(checked) => onChange((state) => ({ ...state, characterAmbiguityCheck: checked }))} />
+              <span>{ruleLabel("characterAmbiguityCheck")}</span>
             </label>
           </div>
         ) : null}
@@ -164,6 +234,7 @@ function buildCategoryOptions(category: ProofreadCategory, options: ProofreadOpt
     ...options,
     languageCheck: false,
     characterCheck: false,
+    characterAmbiguityCheck: false,
     glossaryCheck: false,
     untranslatedStatusCheck: false,
     noTranslateCheck: false,
@@ -175,6 +246,7 @@ function buildCategoryOptions(category: ProofreadCategory, options: ProofreadOpt
   };
   if (category === "language") return { ...disabled, languageCheck: options.languageCheck };
   if (category === "glossary") return { ...disabled, characterCheck: options.characterCheck, glossaryCheck: options.glossaryCheck };
+  if (category === "characterAmbiguity") return { ...disabled, characterAmbiguityCheck: options.characterAmbiguityCheck };
   return {
     ...disabled,
     untranslatedStatusCheck: options.untranslatedStatusCheck,

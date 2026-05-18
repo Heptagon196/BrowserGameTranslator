@@ -5,6 +5,7 @@ import { AddressInfo } from "node:net";
 import { shell } from "electron";
 import { PreviewStatus, ProjectConfig } from "../shared/types";
 import { projectDirs } from "./storage";
+import { findAvailablePreviewPort, normalizePreviewPort } from "./portUtils";
 
 const runningServers = new Map<string, { server: http.Server; url: string }>();
 
@@ -19,11 +20,17 @@ export async function previewProjectGame(project: ProjectConfig): Promise<string
     throw new Error(`项目目录中没有找到首页文件：${homePage}`);
   }
 
+  const requestedPort = normalizePreviewPort(project.previewPort) ?? await findAvailablePreviewPort();
   const existing = runningServers.get(root);
   if (existing?.server.listening) {
-    const url = `${existing.url}${urlPathFor(homePage)}`;
-    await shell.openExternal(url);
-    return url;
+    const existingPort = Number(new URL(existing.url).port);
+    if (existingPort !== requestedPort) {
+      await stopProjectGamePreview(project);
+    } else {
+      const url = `${existing.url}${urlPathFor(homePage)}`;
+      await shell.openExternal(url);
+      return url;
+    }
   }
 
   const server = http.createServer(async (request, response) => {
@@ -52,8 +59,10 @@ export async function previewProjectGame(project: ProjectConfig): Promise<string
   });
 
   const url = await new Promise<string>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
+    server.once("error", (error) => {
+      reject(new Error(portErrorMessage(requestedPort, error)));
+    });
+    server.listen(requestedPort, "127.0.0.1", () => {
       const address = server.address() as AddressInfo;
       resolve(`http://127.0.0.1:${address.port}`);
     });
@@ -66,6 +75,17 @@ export async function previewProjectGame(project: ProjectConfig): Promise<string
   const homeUrl = `${url}${urlPathFor(homePage)}`;
   await shell.openExternal(homeUrl);
   return homeUrl;
+}
+
+function portErrorMessage(port: number, error: unknown): string {
+  if (isNodeError(error) && error.code === "EADDRINUSE") {
+    return `预览端口 ${port} 已被占用。请在项目翻译设置中改用其他端口，或关闭占用该端口的程序。`;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }
 
 export function getProjectPreviewStatus(project: ProjectConfig): PreviewStatus {

@@ -86,6 +86,20 @@ npm run dev
 npm run build
 ```
 
+通过 electron-builder 生成 Windows 便携版 zip：
+
+```powershell
+npm run build
+npm run build:launcher
+npm run package:portable
+```
+
+便携版输出到：
+
+```text
+release/BrowserGameTranslator-0.1.0-win-x64-portable.zip
+```
+
 类型检查：
 
 ```powershell
@@ -145,7 +159,7 @@ tools/launcher/main.c
 
 - 本工具面向已经合法下载到本地的网页游戏，不负责绕过 DRM、登录、付费或服务端资源限制。
 - AI 请求会把待处理文本发送到用户配置的服务商，请在使用前确认文本和 Key 管理策略。
-- 当前没有安装包构建配置；`npm run build` 只生成 Electron 主进程和前端构建产物。
+- 便携版应用包通过 electron-builder 生成，运行前需要先执行 `npm run build` 和 `npm run build:launcher`。
 
 ## 参考
 

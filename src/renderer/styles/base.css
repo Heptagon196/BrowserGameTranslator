@@ -608,6 +608,12 @@ label {
   gap: 14px;
 }
 
+.workflow-panel-row {
+  align-items: flex-start;
+  flex-direction: row;
+  justify-content: space-between;
+}
+
 .workflow-panel h2 {
   margin-bottom: 6px;
 }
@@ -627,6 +633,33 @@ label {
 
 .workflow-actions-split {
   justify-content: space-between;
+}
+
+.workflow-actions-end {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+}
+
+.auto-patch-toggle {
+  align-items: center;
+  color: #273341;
+  display: flex;
+  flex-direction: row;
+  font-size: 13px;
+  font-weight: 700;
+  gap: 8px;
+  justify-content: flex-start;
+  min-height: 38px;
+  width: fit-content;
+}
+
+.auto-patch-toggle > span {
+  line-height: 22px;
+  white-space: nowrap;
+}
+
+.auto-patch-toggle .toggle-switch {
+  flex: 0 0 42px;
 }
 
 .translation-toolbar {
@@ -649,6 +682,12 @@ label {
   padding: 7px 10px;
 }
 
+.extraction-review-status-strip {
+  flex: 1 1 320px;
+  max-width: 520px;
+  min-width: min(100%, 260px);
+}
+
 .inline-progress {
   background: #e4edf1;
   border-radius: 999px;
@@ -668,6 +707,10 @@ label {
 
 .inline-progress:not(.active) .progress-indicator {
   background: #9fb1ba;
+}
+
+.inline-progress.active .progress-indicator {
+  background: linear-gradient(90deg, #1f6f78, #2f9a8e);
 }
 
 .translation-count {
@@ -727,15 +770,34 @@ label {
 }
 
 .progress-modal {
-  max-width: 420px;
+  max-width: 520px;
 }
 
 .progress-track {
   background: #e8eef2;
   border-radius: 999px;
   height: 10px;
-  margin: 18px 0 12px;
+  margin: 0;
   overflow: hidden;
+}
+
+.progress-row {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(88px, 120px) 1fr 44px;
+  margin: 14px 0;
+}
+
+.progress-row span {
+  color: #60717c;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progress-row strong {
+  text-align: right;
 }
 
 .tool-entry {
@@ -780,6 +842,76 @@ label {
   padding-top: 14px;
 }
 
+.download-warning-panel {
+  align-items: center;
+  background: #fff8e8;
+  border: 1px solid #efcf85;
+  border-radius: 6px;
+  color: #61420b;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding: 10px 12px;
+}
+
+.download-warning-panel > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.download-warning-panel span {
+  color: #7a6229;
+  font-size: 13px;
+}
+
+.download-failure-dialog {
+  max-width: 680px;
+}
+
+.download-failure-summary {
+  background: #fff8e8;
+  border: 1px solid #efcf85;
+  border-radius: 6px;
+  color: #61420b;
+  display: grid;
+  font-size: 13px;
+  gap: 5px;
+  margin-top: 12px;
+  padding: 10px 12px;
+}
+
+.download-failure-summary span {
+  color: #7a6229;
+  overflow-wrap: anywhere;
+}
+
+.download-failure-list {
+  background: #14212a;
+  border-radius: 6px;
+  color: #dce8ef;
+  display: grid;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  gap: 6px;
+  margin-top: 12px;
+  max-height: 280px;
+  overflow: auto;
+  padding: 10px;
+}
+
+.download-failure-list div {
+  border-bottom: 1px solid rgba(220, 232, 239, 0.12);
+  overflow-wrap: anywhere;
+  padding-bottom: 6px;
+}
+
+.download-failure-list div:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
 .nested-settings {
   margin-top: 12px;
 }
@@ -822,9 +954,15 @@ label {
 .checkbox-row {
   align-items: center;
   color: #1c2430;
+  display: flex;
   flex-direction: row;
   font-size: 13px;
   gap: 8px;
+}
+
+.checkbox-row span {
+  display: grid;
+  gap: 2px;
 }
 
 .checkbox-row .checkbox-control {
@@ -901,6 +1039,66 @@ label {
 .modal-actions {
   justify-content: flex-end;
   margin-top: 14px;
+}
+
+.ai-review-scope-dialog {
+  max-width: 460px;
+}
+
+.ai-review-scope-dialog h2 {
+  margin-bottom: 6px;
+}
+
+.ai-review-scope-dialog .modal-description {
+  margin-bottom: 12px;
+}
+
+.ai-review-scope-list {
+  display: grid;
+  gap: 8px;
+}
+
+.ai-review-scope-row {
+  align-items: flex-start;
+  border: 1px solid #d7e0e5;
+  border-radius: 6px;
+  cursor: pointer;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 18px 1fr;
+  padding: 10px 12px;
+}
+
+.ai-review-scope-row:hover {
+  background: #f5f8fa;
+  border-color: #b8c8d0;
+}
+
+.ai-review-scope-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.ai-review-scope-title {
+  align-items: baseline;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ai-review-scope-title strong {
+  font-size: 15px;
+}
+
+.ai-review-scope-copy small,
+.ai-review-scope-title small {
+  color: #647382;
+  line-height: 1.35;
+}
+
+.ai-review-scope-actions {
+  margin-top: 22px;
 }
 
 .recent-list {

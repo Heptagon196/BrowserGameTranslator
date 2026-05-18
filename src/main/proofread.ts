@@ -1,10 +1,11 @@
-import { AnalysisResult, ProofreadIssue, ProofreadOptions, TextItem } from "../shared/types";
+import { AnalysisResult, CharacterNameAmbiguity, ProofreadIssue, ProofreadOptions, TextItem } from "../shared/types";
 import { extractHtmlTags, extractPlaceholders } from "./textAnalysisUtils";
 
 export const defaultProofreadOptions = (): ProofreadOptions => ({
   languageCheck: true,
   targetLanguageRatio: 0.75,
   characterCheck: true,
+  characterAmbiguityCheck: false,
   glossaryCheck: true,
   untranslatedStatusCheck: true,
   noTranslateCheck: true,
@@ -18,7 +19,8 @@ export const defaultProofreadOptions = (): ProofreadOptions => ({
 export function proofreadItems(items: TextItem[], analysis: AnalysisResult, options: ProofreadOptions): ProofreadIssue[] {
   const issues: ProofreadIssue[] = [];
   let index = 1;
-  const characterRules = options.characterCheck ? prepareCharacterRules(analysis) : [];
+  const characterRules = options.characterCheck ? prepareCharacterRules(analysis, false) : [];
+  const characterAmbiguityRules = options.characterAmbiguityCheck ? prepareCharacterRules(analysis, true) : [];
   const glossaryRules = options.glossaryCheck ? prepareGlossaryRules(analysis) : [];
   const exclusionRules = prepareExclusionRules(analysis);
   const add = (item: TextItem, rule: string, message: string, severity: "warning" | "error" = "error") => {
@@ -80,8 +82,15 @@ export function proofreadItems(items: TextItem[], analysis: AnalysisResult, opti
     }
     if (options.characterCheck && translation) {
       for (const rule of characterRules) {
-        if (ruleMatches(item.original, rule) && !targetMatches(translation, rule)) {
+        if (ruleMatches(item.original, rule, true) && !targetMatches(translation, rule)) {
           add(item, "character_missing", `人物缺失：原文 ${rule.source}，译文应包含 ${rule.target}。`, "warning");
+        }
+      }
+    }
+    if (options.characterAmbiguityCheck && translation) {
+      for (const rule of characterAmbiguityRules) {
+        if (ruleMatches(item.original, rule, true) && !targetMatches(translation, rule)) {
+          add(item, "character_ambiguity_missing", `易混淆角色名（${characterFieldLabel(rule.field)}）：原文出现 ${rule.source}，译文未包含 ${rule.target}。请确认这里是否指角色。`, "warning");
         }
       }
     }
@@ -118,7 +127,8 @@ function textStatusLabel(value: TextItem["status"]): string {
   }[value] ?? value;
 }
 
-type TermRule = { source: string; target: string; regex?: RegExp };
+type CharacterField = keyof CharacterNameAmbiguity;
+type TermRule = { source: string; target: string; regex?: RegExp; field?: CharacterField };
 type PreserveRule = { source: string; regex?: RegExp };
 
 const autoProcessRules: PreserveRule[] = [
@@ -144,21 +154,21 @@ const autoProcessRules: PreserveRule[] = [
   "%\\d+"
 ].map((source) => ({ source, regex: compileRegex(source) })).filter((rule): rule is PreserveRule & { regex: RegExp } => Boolean(rule.regex));
 
-function prepareCharacterRules(analysis: AnalysisResult): TermRule[] {
+function prepareCharacterRules(analysis: AnalysisResult, needsAmbiguity: boolean): TermRule[] {
   const rules: TermRule[] = [];
   const seen = new Set<string>();
-  const add = (source: string | undefined, target: string | undefined, isRegex = false) => {
+  const add = (source: string | undefined, target: string | undefined, field: CharacterField, isRegex = false) => {
     const normalizedSource = (source ?? "").trim();
     const normalizedTarget = (target ?? "").trim();
     const key = normalizedSource.toLowerCase();
     if (!normalizedSource || !normalizedTarget || seen.has(key)) return;
     seen.add(key);
-    rules.push({ source: normalizedSource, target: normalizedTarget, regex: isRegex ? compileRegex(normalizedSource, "i") : undefined });
+    rules.push({ source: normalizedSource, target: normalizedTarget, field, regex: isRegex ? compileRegex(normalizedSource, "i") : undefined });
   };
   for (const entry of analysis.characters.filter((entry) => entry.enabled)) {
-    add(entry.source, entry.target);
-    add(entry.familyName, entry.familyNameTranslation);
-    add(entry.givenName, entry.givenNameTranslation);
+    if (Boolean(entry.ambiguity?.source) === needsAmbiguity) add(entry.source, entry.target, "source");
+    if (Boolean(entry.ambiguity?.familyName) === needsAmbiguity) add(entry.familyName, entry.familyNameTranslation, "familyName");
+    if (Boolean(entry.ambiguity?.givenName) === needsAmbiguity) add(entry.givenName, entry.givenNameTranslation, "givenName");
   }
   return rules;
 }
@@ -178,34 +188,40 @@ function prepareGlossaryRules(analysis: AnalysisResult): TermRule[] {
   return rules;
 }
 
+function characterFieldLabel(field: CharacterField | undefined): string {
+  if (field === "familyName") return "姓";
+  if (field === "givenName") return "名";
+  return "姓名";
+}
+
 function prepareExclusionRules(analysis: AnalysisResult): PreserveRule[] {
   return analysis.noTranslate
     .filter((entry) => entry.enabled && entry.marker)
     .map((entry) => ({ source: entry.marker, regex: entry.isRegex ? compileRegex(entry.marker, "g") : undefined }));
 }
 
-function ruleMatches(value: string, rule: TermRule): boolean {
+function ruleMatches(value: string, rule: TermRule, caseSensitive = false): boolean {
   if (rule.regex) {
     rule.regex.lastIndex = 0;
     return rule.regex.test(value);
   }
-  return containsLocalizedTerm(value, rule.source);
+  return containsLocalizedTerm(value, rule.source, caseSensitive);
 }
 
 function targetMatches(value: string, rule: TermRule): boolean {
   return containsLocalizedTerm(value, rule.target);
 }
 
-function containsLocalizedTerm(text: string, term: string): boolean {
+function containsLocalizedTerm(text: string, term: string, caseSensitive = false): boolean {
   const normalizedTerm = term.trim();
   if (!normalizedTerm) return false;
   if (!shouldUseAlphabeticBoundary(normalizedTerm)) {
-    return text.toLocaleLowerCase().includes(normalizedTerm.toLocaleLowerCase());
+    return caseSensitive ? text.includes(normalizedTerm) : text.toLocaleLowerCase().includes(normalizedTerm.toLocaleLowerCase());
   }
   try {
-    return new RegExp(`(?<![\\p{L}\\p{N}\\p{M}_])${escapeRegex(normalizedTerm)}(?![\\p{L}\\p{N}\\p{M}_])`, "iu").test(text);
+    return new RegExp(`(?<![\\p{L}\\p{N}\\p{M}_])${escapeRegex(normalizedTerm)}(?![\\p{L}\\p{N}\\p{M}_])`, caseSensitive ? "u" : "iu").test(text);
   } catch {
-    return containsDelimitedTerm(text, normalizedTerm);
+    return containsDelimitedTerm(text, normalizedTerm, caseSensitive);
   }
 }
 
@@ -221,9 +237,9 @@ function hasCjkOrNoSpaceScript(value: string): boolean {
   return /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u.test(value);
 }
 
-function containsDelimitedTerm(text: string, term: string): boolean {
-  const haystack = text.toLocaleLowerCase();
-  const needle = term.toLocaleLowerCase();
+function containsDelimitedTerm(text: string, term: string, caseSensitive = false): boolean {
+  const haystack = caseSensitive ? text : text.toLocaleLowerCase();
+  const needle = caseSensitive ? term : term.toLocaleLowerCase();
   let index = haystack.indexOf(needle);
   while (index >= 0) {
     const before = text[index - 1] ?? "";

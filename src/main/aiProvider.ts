@@ -1,4 +1,4 @@
-import { AnalysisResult, PromptConfig, ProofreadIssue, ProviderConfig, TextItem } from "../shared/types";
+import { AnalysisResult, CharacterNameAmbiguity, PromptConfig, ProofreadIssue, ProviderConfig, TextItem } from "../shared/types";
 import { extractHtmlTags, extractPlaceholders } from "./textAnalysisUtils";
 
 type ChatUsage = {
@@ -84,6 +84,7 @@ export async function translateAnalysisResourcesWithProviderWithIo(
         source: entry.source,
         familyName: entry.familyName ?? "",
         givenName: entry.givenName ?? "",
+        ambiguity: normalizeCharacterAmbiguity(entry.ambiguity),
         note: entry.note
       })),
     ...analysis.glossary
@@ -109,6 +110,7 @@ export async function translateAnalysisResourcesWithProviderWithIo(
         `请将资源表条目的 source 从 ${sourceLanguage} 翻译为 ${targetLanguage}。`,
         "只补全 target 为空的条目，不要解释，不要输出 Markdown。",
         "保持专名、术语风格统一；无法确定时给出最自然、最短的译名。",
+        "characters 条目中的 ambiguity 表示完整姓名、姓或名容易和普通词混淆，译名仍按角色名处理。",
         "必须返回 JSON 数组，每项格式为：",
         "{\"table\":\"characters|glossary\",\"id\":\"原 id\",\"target\":\"译文\",\"familyNameTranslation\":\"可选\",\"givenNameTranslation\":\"可选\"}"
       ].join("\n")
@@ -166,12 +168,13 @@ export async function analyzeWithProviderWithIo(provider: ProviderConfig, items:
       role: "user",
       content: JSON.stringify({
         schema: {
-          characters: [{ source: "", target: "", familyName: "", familyNameTranslation: "", givenName: "", givenNameTranslation: "", nicknameOf: "", note: "" }],
+          characters: [{ source: "", target: "", familyName: "", familyNameTranslation: "", givenName: "", givenNameTranslation: "", nicknameOf: "", ambiguity: { source: false, familyName: false, givenName: false }, note: "" }],
           glossary: [{ source: "", target: "", note: "", category: "", isRegex: false }],
           noTranslate: [{ marker: "", note: "", isRegex: false }]
         },
         extractionRules: [
           "人物名、称号、地名、组织名、技能名、道具名、UI 固定文案都可以进入术语表。",
+          "如果完整姓名、姓或名也是常见普通词、月份、动词等，characters 条目请分别设置 ambiguity.source、ambiguity.familyName、ambiguity.givenName，并在 note 说明歧义。",
           "变量、控制代码、HTML 标签、占位符、文件路径、URL、格式化符号、脚本片段应进入禁翻表。"
         ],
         items: sample
@@ -195,6 +198,7 @@ export async function analyzeWithProviderWithIo(provider: ProviderConfig, items:
       givenName: stringOrUndefined(entry.givenName),
       givenNameTranslation: stringOrUndefined(entry.givenNameTranslation),
       nicknameOf: stringOrUndefined(entry.nicknameOf),
+      ambiguity: normalizeCharacterAmbiguity(entry.ambiguity),
       note: String(entry.note ?? ""),
       enabled: true
     })),
@@ -226,7 +230,7 @@ export async function translateWithProvider(
   prompts: PromptConfig,
   analysis?: AnalysisResult,
   onIo?: (io: AiProgramIo) => void,
-  options?: { force?: boolean; titlePrefix?: string }
+  options?: { force?: boolean; titlePrefix?: string; batchIndexOffset?: number; batchTotal?: number }
 ): Promise<TextItem[]> {
   const activeItems = items.filter((item) => item.status !== "excluded" && (options?.force || !item.translation));
   const batches = chunk(activeItems, 20);
@@ -245,7 +249,9 @@ export async function translateWithProvider(
       }
     ];
     const content = await chatCompletion(provider, requestMessages);
-    onIo?.({ title: `${options?.titlePrefix ?? "AI 翻译"}批次 ${batchIndex + 1}/${batches.length}`, requestMessages, responseContent: content });
+    const displayBatchIndex = (options?.batchIndexOffset ?? 0) + batchIndex + 1;
+    const displayBatchTotal = options?.batchTotal ?? batches.length;
+    onIo?.({ title: `${options?.titlePrefix ?? "AI 翻译"}批次 ${displayBatchIndex}/${displayBatchTotal}`, requestMessages, responseContent: content });
     const rows = parseTranslatedRows(content, batch);
     for (const row of rows) {
       const item = updated.get(row.id);
@@ -276,16 +282,17 @@ export async function proofreadWithProviderWithIo(
   sourceLanguage: string,
   targetLanguage: string,
   prompts: PromptConfig,
-  analysis?: AnalysisResult
-): Promise<{ items: TextItem[]; updatedCount: number; requestMessages: Array<{ role: string; content: string }>; responseContent: string }> {
+  analysis?: AnalysisResult,
+  onIo?: (io: AiProgramIo) => void,
+  options?: { titlePrefix?: string; batchIndexOffset?: number; batchTotal?: number }
+): Promise<{ items: TextItem[]; updatedCount: number }> {
   const jobs = buildProofreadJobs(items, issues);
-  if (!jobs.length) return { items, updatedCount: 0, requestMessages: [], responseContent: "" };
+  if (!jobs.length) return { items, updatedCount: 0 };
   const updated = new Map(items.map((item) => [item.id, item]));
-  const requestMessages: Array<{ role: string; content: string }> = [];
-  const responseParts: string[] = [];
   let updatedCount = 0;
+  const batches = chunk(jobs, 20);
 
-  for (const batch of chunk(jobs, 20)) {
+  for (const [batchIndex, batch] of batches.entries()) {
     const currentBatch = batch.map((job) => {
       const current = updated.get(job.id);
       return current ? { ...job, translation: current.translation } : job;
@@ -295,8 +302,9 @@ export async function proofreadWithProviderWithIo(
       { role: "user", content: buildProofreadUserPrompt(currentBatch, targetLanguage) }
     ];
     const content = await chatCompletion(provider, messages);
-    requestMessages.push(...messages);
-    responseParts.push(content);
+    const displayBatchIndex = (options?.batchIndexOffset ?? 0) + batchIndex + 1;
+    const displayBatchTotal = options?.batchTotal ?? batches.length;
+    onIo?.({ title: `${options?.titlePrefix ?? "AI 自动校对"}批次 ${displayBatchIndex}/${displayBatchTotal}`, requestMessages: messages, responseContent: content });
     const rows = parseProofreadRows(content);
     for (const row of rows) {
       const item = updated.get(row.id);
@@ -313,7 +321,7 @@ export async function proofreadWithProviderWithIo(
     }
   }
 
-  return { items: Array.from(updated.values()), updatedCount, requestMessages, responseContent: responseParts.join("\n\n---\n\n") };
+  return { items: Array.from(updated.values()), updatedCount };
 }
 
 function buildProofreadJobs(items: TextItem[], issues: ProofreadIssue[]): ProofreadJob[] {
@@ -816,6 +824,30 @@ function stringOrUndefined(value: unknown): string | undefined {
   return text ? text : undefined;
 }
 
+function normalizeCharacterAmbiguity(value: unknown): CharacterNameAmbiguity | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const ambiguity: CharacterNameAmbiguity = {
+    source: record.source === true,
+    familyName: record.familyName === true,
+    givenName: record.givenName === true
+  };
+  return hasCharacterAmbiguity(ambiguity) ? ambiguity : undefined;
+}
+
+function hasCharacterAmbiguity(ambiguity: CharacterNameAmbiguity | undefined): boolean {
+  return Boolean(ambiguity?.source || ambiguity?.familyName || ambiguity?.givenName);
+}
+
+function characterAmbiguityLabel(ambiguity: CharacterNameAmbiguity | undefined): string {
+  const labels = [
+    ambiguity?.source ? "姓名" : "",
+    ambiguity?.familyName ? "姓" : "",
+    ambiguity?.givenName ? "名" : ""
+  ].filter(Boolean);
+  return labels.join("、") || "未标记";
+}
+
 function buildAnalysisSample(items: TextItem[]): Array<{ id: string; text: string; file: string; before?: string; after?: string }> {
   const seen = new Set<string>();
   return items
@@ -827,14 +859,13 @@ function buildAnalysisSample(items: TextItem[]): Array<{ id: string; text: strin
     })
     .sort((a, b) => scoreForAnalysis(b) - scoreForAnalysis(a))
     .slice(0, 500)
-    .map((item) => ({ id: item.id, text: item.original, file: item.sourceFile, before: item.context.before, after: item.context.after }));
+    .map((item) => ({ id: item.id, text: item.original, file: item.sourceFile }));
 }
 
 function scoreForAnalysis(item: TextItem): number {
   let score = Math.min(item.original.length, 240);
   if (/[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+/.test(item.original)) score += 80;
   if (/[%$][\w\d]+|\\[A-Za-z]+\[|<[^>]+>|\{[^}]+\}/.test(item.original)) score += 60;
-  if (item.context.before || item.context.after) score += 20;
   return score;
 }
 
@@ -900,13 +931,24 @@ function buildResourceSections(batch: TextItem[], analysis?: AnalysisResult): st
   if (!analysis) return "";
   const sourceText = batch.map((item) => item.original).join("\n");
   const sections: string[] = [];
-  const characters = analysis.characters.filter((entry) => entry.enabled && entry.source && matchesSource(sourceText, entry.source, false));
-  if (characters.length) {
+  const characters = analysis.characters.filter((entry) => characterEntryMatchesSource(sourceText, entry));
+  const regularCharacters = characters.filter((entry) => !hasCharacterAmbiguity(entry.ambiguity));
+  const characterAmbiguityRows = characters.filter((entry) => hasCharacterAmbiguity(entry.ambiguity));
+  if (regularCharacters.length) {
     sections.push(
       [
         "###角色表",
         "原文|译文|备注",
-        ...characters.slice(0, 80).map((entry) => `${entry.source}|${entry.target || "待定"}|${entry.note}`)
+        ...regularCharacters.slice(0, 80).map((entry) => `${entry.source}|${entry.target || "待定"}|${entry.note}`)
+      ].join("\n")
+    );
+  }
+  if (characterAmbiguityRows.length) {
+    sections.push(
+      [
+        "###易混淆角色名表",
+        "原文|译文|易混淆字段|备注",
+        ...characterAmbiguityRows.slice(0, 80).map((entry) => `${entry.source}|${entry.target || "待定"}|${characterAmbiguityLabel(entry.ambiguity)}|可能和普通词混淆，仅在对应字段确认为角色名时使用。${entry.note ? ` ${entry.note}` : ""}`)
       ].join("\n")
     );
   }
@@ -933,6 +975,11 @@ function buildResourceSections(batch: TextItem[], analysis?: AnalysisResult): st
   return sections.join("\n\n");
 }
 
+function characterEntryMatchesSource(sourceText: string, entry: AnalysisResult["characters"][number]): boolean {
+  return entry.enabled
+    && [entry.source, entry.familyName, entry.givenName].some((source) => source && matchesSource(sourceText, source, false, true));
+}
+
 function buildUserRulesSection(rules: string[]): string {
   const activeRules = rules.map((rule) => rule.trim()).filter(Boolean);
   if (!activeRules.length) return "";
@@ -951,11 +998,16 @@ function formatSourceTextarea(batch: TextItem[]): string[] {
 
 function parseTranslatedRows(content: string, batch: TextItem[]): Array<{ id: string; translation: string }> {
   try {
-    return parseJsonArray(content).map((row) => ({ id: String(row.id ?? ""), translation: String(row.translation ?? "") })).filter((row) => row.id);
+    const rows = parseJsonArray(content)
+      .filter((row) => row && typeof row === "object" && !Array.isArray(row))
+      .map((row) => ({ id: String(row.id ?? ""), translation: String(row.translation ?? "") }))
+      .filter((row) => row.id);
+    if (rows.length) return rows;
   } catch {
-    const textarea = extractTextarea(content);
-    return parseTextareaRows(textarea, batch);
+    // Fall back to textarea parsing below.
   }
+  const textarea = extractTextarea(content);
+  return parseTextareaRows(textarea, batch);
 }
 
 function extractTextarea(content: string): string {
@@ -981,7 +1033,7 @@ function parseTextareaRows(textarea: string, batch: TextItem[]): Array<{ id: str
         currentNumber = null;
         continue;
       }
-      const content = line.replace(/^\s*"?\d+\.\d+\.,/, "").replace(/",?\s*$/, "").replace(/\\"/g, '"');
+      const content = line.replace(/^\s*"?\d+\.\d+\.[,，]?/, "").replace(/",?\s*$/, "").replace(/\\"/g, '"');
       byNumber.get(currentNumber)?.push(content);
       continue;
     }
@@ -1016,11 +1068,11 @@ function newlineCount(value: string): number {
   return (trimmed.match(/\n/g) ?? []).length + (trimmed.match(/\\n/g) ?? []).length;
 }
 
-function matchesSource(sourceText: string, needle: string, isRegex: boolean): boolean {
+function matchesSource(sourceText: string, needle: string, isRegex: boolean, caseSensitive = false): boolean {
   if (!needle) return false;
-  if (!isRegex) return sourceText.toLowerCase().includes(needle.toLowerCase());
+  if (!isRegex) return caseSensitive ? sourceText.includes(needle) : sourceText.toLowerCase().includes(needle.toLowerCase());
   try {
-    return new RegExp(needle, "i").test(sourceText);
+    return new RegExp(needle, caseSensitive ? "" : "i").test(sourceText);
   } catch {
     return false;
   }

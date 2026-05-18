@@ -168,6 +168,15 @@ export default function AIChatPanel({
     localStorage.setItem("bgt.aiPermissionMode", permissionMode);
   }, [permissionMode]);
   React.useEffect(() => {
+    let cancelled = false;
+    void window.bgt.listProgramAiIo().then((events) => {
+      if (!cancelled) setProgramIoEvents(events.slice(-200));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  React.useEffect(() => {
     return window.bgt.onProgramAiIo((event) => {
       setProgramIoEvents((events) => [...events.slice(-199), event]);
     });
@@ -1780,6 +1789,7 @@ function fieldLabel(key: string): string {
     givenName: "名",
     givenNameTranslation: "名字译名",
     nicknameOf: "本名角色",
+    ambiguity: "易混淆字段",
     marker: "禁翻标记",
     isRegex: "正则",
     category: "分类",
