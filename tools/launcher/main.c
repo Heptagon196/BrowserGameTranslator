@@ -444,7 +444,7 @@ static SOCKET create_listening_server(unsigned short configuredPort, int hasConf
     closesocket(server);
   }
 
-  snprintf(errorMessage, errorMessageSize, "没有找到可用的大于 10000 的本地服务端口。");
+  snprintf(errorMessage, errorMessageSize, "自动分配本地服务端口失败。启动器已尝试 10001-65535 范围内的随机端口，请检查安全软件、防火墙或在 BGT-Launcher.json 中手动指定 port。");
   return INVALID_SOCKET;
 }
 

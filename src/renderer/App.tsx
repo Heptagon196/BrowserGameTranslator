@@ -8,6 +8,7 @@ import {
   Archive,
   BookOpen,
   Bot,
+  Compass,
   Download,
   FileSearch,
   FolderOpen,
@@ -53,8 +54,9 @@ import {
   type UiSettings
 } from "./settingsModel";
 import "./styles.css";
+import "./styles/guide.css";
 
-type ViewId = "project" | "dictionary" | "extractionRules" | "import" | "analysis" | "translate" | "proofread" | "prompts" | "tools" | "settings";
+type ViewId = "guide" | "project" | "dictionary" | "extractionRules" | "import" | "analysis" | "translate" | "proofread" | "prompts" | "tools" | "settings";
 
 type LazyWithPreload<T extends React.ComponentType<any>> = React.LazyExoticComponent<T> & {
   preload: () => Promise<{ default: T }>;
@@ -66,6 +68,7 @@ function lazyWithPreload<T extends React.ComponentType<any>>(loader: () => Promi
   return component;
 }
 
+const GuideView = lazyWithPreload(() => import("./views/GuideView"));
 const ImportExportView = lazyWithPreload(() => import("./views/ImportExportView"));
 const AnalysisView = lazyWithPreload(() => import("./views/AnalysisView"));
 const TranslateView = lazyWithPreload(() => import("./views/TranslateView"));
@@ -95,6 +98,7 @@ const defaultProofOptions: ProofreadOptions = {
 };
 
 const viewPreloaders: Partial<Record<ViewId, () => Promise<unknown>>> = {
+  guide: GuideView.preload,
   import: ImportExportView.preload,
   analysis: AnalysisView.preload,
   translate: TranslateView.preload,
@@ -442,7 +446,7 @@ function App() {
       <header className="topbar">
         <div>
           <h1>{viewTitle(view)}</h1>
-          <p>{snapshot.project ? `${snapshot.project.projectName} · ${languageLabel(snapshot.project.sourceLanguage)} -> ${languageLabel(snapshot.project.targetLanguage)}` : "创建或打开项目后开始"}</p>
+          <p>{viewSubtitle(view, snapshot)}</p>
         </div>
         <div className="topbar-actions">
           {chatCollapsed && (
@@ -464,6 +468,11 @@ function App() {
         </div>
       </header>
       <section className={tableViewIds.has(view) ? "content table-content" : "content"}>
+        {view === "guide" && (
+          <Suspense fallback={null}>
+            <GuideView hasProject={Boolean(snapshot.project)} onNavigate={navigateTo} />
+          </Suspense>
+        )}
         {view === "project" && <ProjectView busy={busy} snapshot={snapshot} run={run} mergeSnapshot={mergeSnapshot} showToast={showToast} />}
         {view === "import" && (
           <Suspense fallback={null}>
@@ -605,6 +614,7 @@ function App() {
               <span>Browser game localization</span>
             </div>
           </div>
+          <NavButton active={view === "guide"} icon={<Compass size={18} />} label="指引" onClick={() => navigateTo("guide")} onPreload={() => preloadView("guide")} />
           <NavButton active={["project", "import", "analysis", "translate", "proofread"].includes(view)} icon={<FolderOpen size={18} />} label="项目" onClick={() => navigateTo("project")} onPreload={() => preloadView("project")} />
           {snapshot.project ? (
             <div className="sidebar-subnav" aria-label="项目流程">
@@ -1413,6 +1423,7 @@ function formatBytes(value: number): string {
 
 function viewTitle(view: ViewId): string {
   return {
+    guide: "指引",
     project: "项目",
     import: "提取/回填",
     analysis: "术语分析",
@@ -1424,6 +1435,11 @@ function viewTitle(view: ViewId): string {
     tools: "工具",
     settings: "设置"
   }[view];
+}
+
+function viewSubtitle(view: ViewId, snapshot: AppStateSnapshot): string {
+  if (view === "guide") return "从打开项目到打包交付的快速上手路线";
+  return snapshot.project ? `${snapshot.project.projectName} · ${languageLabel(snapshot.project.sourceLanguage)} -> ${languageLabel(snapshot.project.targetLanguage)}` : "创建或打开项目后开始";
 }
 
 function currentTableContext(view: ViewId, activeAnalysisTable: ResourceTableId): { currentTable?: string; currentTableId?: string; currentTableDescription?: string } {
