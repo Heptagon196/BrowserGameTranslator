@@ -10,7 +10,11 @@
     "build:icon": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/generate-icons.ps1",
     "build:launcher": "node scripts/build-launcher.cjs",
     "build": "tsc -p tsconfig.main.json && vite build",
-    "package:portable": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false ELECTRON_CACHE=.cache/electron ELECTRON_BUILDER_CACHE=.cache/electron-builder electron-builder --win zip --x64",
+    "package:dir": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false ELECTRON_CACHE=.cache/electron ELECTRON_BUILDER_CACHE=.cache/electron-builder electron-builder --win dir --x64",
+    "package:velopack": "node scripts/package-velopack.cjs",
+    "package:portable": "npm run build && npm run build:launcher && npm run package:dir && npm run package:velopack",
+    "velopack:download:github": "vpk download github --outputDir release/velopack --repoUrl https://github.com/Heptagon196/BrowserGameTranslator",
+    "velopack:upload:github": "vpk upload github --outputDir release/velopack --repoUrl https://github.com/Heptagon196/BrowserGameTranslator --merge",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.main.json",
     "lint": "eslint src --max-warnings 0",
     "check:unused": "tsc --noEmit -p tsconfig.unused.json",
@@ -61,7 +65,8 @@
     "remark-gfm": "^4.0.1",
     "sonner": "^2.0.7",
     "turndown": "^7.2.4",
-    "turndown-plugin-gfm": "^1.0.2"
+    "turndown-plugin-gfm": "^1.0.2",
+    "velopack": "^0.0.1589-ga2c5a97"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -92,6 +97,9 @@
     "files": [
       "dist/**/*",
       "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/velopack/lib/native/**/*"
     ],
     "extraResources": [
       {

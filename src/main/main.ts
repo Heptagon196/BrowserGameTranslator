@@ -24,8 +24,9 @@ import { openProjectDirectory as openProjectDirectoryInShell, packageProject } f
 import { getProjectPreviewStatus, previewProjectGame, stopProjectGamePreview } from "./previewService";
 import { ProjectService } from "./projectService";
 import { defaultProofreadOptions, proofreadItems } from "./proofread";
-import { appendLog, projectDirs, projectPaths, readJsonl, saveAnalysis, writeJson, writeJsonl } from "./storage";
+import { appendLog, projectDirs, projectPaths, saveAnalysis, writeJsonl } from "./storage";
 import { isWebSearchCdpHostProcess, runWebSearchCdpHost } from "./webSearchCdpHost";
+import { applyUpdate as applySoftwareUpdate, checkForUpdates as checkForSoftwareUpdates, downloadUpdate as downloadSoftwareUpdate, getAppVersionInfo, runVelopackStartup } from "./updateService";
 import {
   AaOfflineDownloadInput,
   AgentChatHistoryItem,
@@ -58,6 +59,7 @@ if (isWebSearchCdpHostProcess()) {
     app.quit();
   });
 } else {
+runVelopackStartup();
 const projectService = new ProjectService();
 const agentChatHistoryService = new AgentChatHistoryService(projectService);
 const activeAgentRuns = new Map<string, AbortController>();
@@ -181,6 +183,10 @@ ipcMain.handle("external:open", async (_event, url: string) => {
   if (!/^https:\/\/[A-Za-z0-9.-]+\//.test(url)) throw new Error("Only HTTPS URLs can be opened externally.");
   await shell.openExternal(url);
 });
+ipcMain.handle("updates:getVersion", async () => getAppVersionInfo());
+ipcMain.handle("updates:check", async () => checkForSoftwareUpdates());
+ipcMain.handle("updates:download", async (_event, update: unknown) => downloadSoftwareUpdate(update));
+ipcMain.handle("updates:apply", async (_event, update: unknown) => applySoftwareUpdate(update));
 ipcMain.handle("project:create", async (_event, input) => projectService.createProject(input));
 ipcMain.handle("project:open", async () => projectService.openProject());
 ipcMain.handle("project:openDirectory", async (_event, directory: string) => projectService.openProjectDirectory(directory));

@@ -13,6 +13,7 @@ import {
   AgentRunEventPayload,
   AgentRunResult,
   AgentRunStreamRequest,
+  AppVersionInfo,
   AppStateSnapshot,
   CreateProjectInput,
   DictionaryImportResult,
@@ -40,7 +41,6 @@ import {
   OnlineDictionarySettings,
   OnlineDictionarySubmissionOptions,
   OnlineDictionarySubmissionPackageResult,
-  OnlineDictionarySummary,
   OnlineDictionaryTable,
   OnlineDictionaryTokenStatus,
   OnlineDictionaryUpdateOptions,
@@ -63,6 +63,8 @@ import {
   ProviderConfig,
   ResourceTableType,
   TextItem,
+  UpdateCheckResult,
+  UpdateDownloadProgress,
   WebGameDownloadEvent,
   WebGameDownloadInput,
   WebGameDownloadProgress,
@@ -93,6 +95,15 @@ const api = {
   testProvider: (provider: ProviderConfig): Promise<string> => ipcRenderer.invoke("providers:test", provider),
   loadAiBalance: (provider: ProviderConfig): Promise<AiBalanceSnapshot> => ipcRenderer.invoke("ai-balance:load", provider),
   loadSystemFonts: (): Promise<string[]> => ipcRenderer.invoke("system:fonts"),
+  getAppVersion: (): Promise<AppVersionInfo> => ipcRenderer.invoke("updates:getVersion"),
+  checkForUpdates: (): Promise<UpdateCheckResult> => ipcRenderer.invoke("updates:check"),
+  downloadUpdate: (update: unknown): Promise<void> => ipcRenderer.invoke("updates:download", update),
+  applyUpdate: (update: unknown): Promise<void> => ipcRenderer.invoke("updates:apply", update),
+  onUpdateDownloadProgress: (listener: (progress: UpdateDownloadProgress) => void): (() => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, progress: UpdateDownloadProgress) => listener(progress);
+    ipcRenderer.on("updates:download-progress", wrapped);
+    return () => ipcRenderer.removeListener("updates:download-progress", wrapped);
+  },
   onAiCostUpdate: (listener: () => void): (() => void) => {
     const wrapped = () => listener();
     ipcRenderer.on("ai-cost:update", wrapped);

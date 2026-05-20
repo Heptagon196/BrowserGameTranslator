@@ -230,16 +230,43 @@ npm run build:launcher
 生成 Windows 便携版 zip：
 
 ```powershell
-npm run build
-npm run build:launcher
 npm run package:portable
 ```
+
+这个命令会先构建应用、编译内置启动器，再生成 Windows 应用目录，并用 Velopack 打出可自更新的便携版包。
 
 便携版输出到：
 
 ```text
-release/BrowserGameTranslator-0.1.0-win-x64-portable.zip
+release/velopack/BrowserGameTranslator-win-Portable.zip
 ```
+
+发布到 GitHub Releases 时，需要同时上传 Velopack 更新所需资产：
+
+```text
+release/velopack/BrowserGameTranslator-win-Portable.zip
+release/velopack/BrowserGameTranslator-0.1.0-full.nupkg
+release/velopack/releases.win.json
+release/velopack/assets.win.json
+```
+
+推荐用 Velopack CLI 发布到 GitHub Releases，避免漏传更新索引：
+
+```powershell
+npm run velopack:upload:github
+```
+
+这一步是发布者操作，需要本机具备该仓库的 Release 写权限；不影响普通用户检查和安装更新。
+
+如果需要生成 delta 包，打包前先拉取远端最新 Velopack 资产：
+
+```powershell
+npm run velopack:download:github
+npm run package:portable
+npm run velopack:upload:github
+```
+
+检查更新依赖最新 Release 中的 `releases.win.json` 和对应 `.nupkg`。如果最新 Release 只有用户下载的 portable zip，应用内检查更新会失败。应用运行时不需要 GitHub token；公开仓库的 Release 资产必须可匿名读取。
 
 ## 图标与启动器
 

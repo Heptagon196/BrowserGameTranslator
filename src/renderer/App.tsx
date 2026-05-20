@@ -35,6 +35,7 @@ import type {
   ProofreadOptions,
   ProviderConfig,
   TextItem,
+  UpdateCheckResult,
   WebGameDownloadEvent,
   WebGameDownloadProgress,
   WebGameDownloadResult
@@ -79,6 +80,7 @@ const PromptsView = lazyWithPreload(() => import("./views/PromptsView"));
 const ToolsView = lazyWithPreload(() => import("./views/ToolsView"));
 const SettingsView = lazyWithPreload(() => import("./views/SettingsView"));
 const AIChatPanel = lazyWithPreload(() => import("./components/ai-chat/AIChatPanel"));
+const SoftwareUpdateDialog = lazyWithPreload(() => import("./components/SoftwareUpdateDialog"));
 
 const tableViewIds = new Set<ViewId>(["import", "analysis", "translate", "proofread"]);
 const emptyAnalysis: AnalysisResult = { characters: [], glossary: [], noTranslate: [] };
@@ -191,6 +193,10 @@ function App() {
   const [proofOptions, setProofOptions] = useState(loadProofreadOptions);
   const [searchPaginationEnabled, setSearchPaginationEnabled] = useState(() => localStorage.getItem("bgt.searchPaginationEnabled") === "true");
   const [autoPatchBeforeOutput, setAutoPatchBeforeOutput] = useState(() => localStorage.getItem("bgt.autoPatchBeforeOutput") !== "false");
+  const [autoCheckUpdates, setAutoCheckUpdates] = useState(() => localStorage.getItem("bgt.autoCheckUpdates") !== "false");
+  const [startupUpdateCheck, setStartupUpdateCheck] = useState<UpdateCheckResult | null>(null);
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+  const [settingsFocusUpdatesRequest, setSettingsFocusUpdatesRequest] = useState(0);
   const [tablePageSize, setTablePageSize] = useState(() => normalizeTablePageSize(localStorage.getItem("bgt.tablePageSize")));
   const [uiSettings, setUiSettings] = useState(loadUiSettings);
 
@@ -238,6 +244,12 @@ function App() {
   const navigateTo = (nextView: ViewId) => {
     preloadView(nextView);
     startViewTransition(() => setView(nextView));
+  };
+
+  const openUpdateSettings = () => {
+    setUpdateDialogOpen(false);
+    setSettingsFocusUpdatesRequest((value) => value + 1);
+    navigateTo("settings");
   };
 
   const refreshAiBalance = useCallback(async (provider?: ProviderConfig, force = false) => {
@@ -407,6 +419,27 @@ function App() {
   }, [autoPatchBeforeOutput]);
 
   useEffect(() => {
+    localStorage.setItem("bgt.autoCheckUpdates", String(autoCheckUpdates));
+  }, [autoCheckUpdates]);
+
+  useEffect(() => {
+    if (!autoCheckUpdates) return;
+    let cancelled = false;
+    window.bgt.checkForUpdates()
+      .then((result) => {
+        if (cancelled || !result.hasUpdate) return;
+        setStartupUpdateCheck(result);
+        setUpdateDialogOpen(true);
+      })
+      .catch(() => {
+        // Startup update checks should never interrupt normal app launch.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     localStorage.setItem("bgt.tablePageSize", String(tablePageSize));
   }, [tablePageSize]);
 
@@ -557,8 +590,12 @@ function App() {
               setSearchPaginationEnabled={setSearchPaginationEnabled}
               autoPatchBeforeOutput={autoPatchBeforeOutput}
               setAutoPatchBeforeOutput={setAutoPatchBeforeOutput}
+              autoCheckUpdates={autoCheckUpdates}
+              setAutoCheckUpdates={setAutoCheckUpdates}
               uiSettings={uiSettings}
               setUiSettings={setUiSettings}
+              focusUpdatesRequest={settingsFocusUpdatesRequest}
+              initialUpdateCheck={startupUpdateCheck}
             />
           </Suspense>
         )}
@@ -698,6 +735,16 @@ function App() {
             onStart={startPackage}
           />
         )}
+        {updateDialogOpen ? (
+          <Suspense fallback={null}>
+            <SoftwareUpdateDialog
+              open={updateDialogOpen}
+              updateCheck={startupUpdateCheck}
+              onOpenChange={setUpdateDialogOpen}
+              onOpenSettings={openUpdateSettings}
+            />
+          </Suspense>
+        ) : null}
         {patchProgress && <PatchProgressDialog progress={patchProgress} />}
         <Toaster position="top-center" richColors duration={2600} />
       </div>

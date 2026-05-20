@@ -72,6 +72,37 @@ export interface AaOfflineDownloadResult {
 
 export type PackageFormat = "zip" | "7z" | "tar.xz";
 
+export interface AppVersionInfo {
+  currentVersion: string;
+  installedByUpdater: boolean;
+  isPortable?: boolean;
+  appId?: string;
+  updatePendingRestart?: UpdateDescriptor;
+  error?: string;
+}
+
+export interface UpdateDescriptor {
+  targetVersion: string;
+  releaseNotes?: string;
+  releaseNotesHtml?: string;
+  releaseUrl?: string;
+  packageFileName?: string;
+  packageSize?: number;
+  raw: unknown;
+}
+
+export interface UpdateCheckResult {
+  currentVersion: string;
+  installedByUpdater: boolean;
+  hasUpdate: boolean;
+  update?: UpdateDescriptor;
+  error?: string;
+}
+
+export interface UpdateDownloadProgress {
+  percent: number;
+}
+
 export interface PackageProjectInput {
   fileName: string;
   format: PackageFormat;

@@ -1,6 +1,6 @@
 ﻿import React, { useEffect, useRef, useState } from "react";
-import { ExternalLink, Plus, Save, Trash2 } from "lucide-react";
-import type { AppStateSnapshot, OnlineDictionarySource, ProviderConfig } from "../../shared/types";
+import { Download, ExternalLink, Plus, RefreshCw, RotateCcw, Save, Trash2 } from "lucide-react";
+import type { AppStateSnapshot, AppVersionInfo, OnlineDictionarySource, ProviderConfig, UpdateCheckResult, UpdateDescriptor } from "../../shared/types";
 import { CommandSelect, FontSelect, FontSizeControl } from "../components/ui/Selectors";
 import { FieldRow } from "../components/ui/Form";
 import { StyledSelect, ToggleSwitch } from "../components/ui/Primitives";
@@ -37,8 +37,12 @@ export default function SettingsView({
   setSearchPaginationEnabled,
   autoPatchBeforeOutput,
   setAutoPatchBeforeOutput,
+  autoCheckUpdates,
+  setAutoCheckUpdates,
   uiSettings,
-  setUiSettings
+  setUiSettings,
+  focusUpdatesRequest,
+  initialUpdateCheck
 }: {
   snapshot: AppStateSnapshot;
   setSnapshot: React.Dispatch<React.SetStateAction<AppStateSnapshot>>;
@@ -50,8 +54,12 @@ export default function SettingsView({
   setSearchPaginationEnabled: React.Dispatch<React.SetStateAction<boolean>>;
   autoPatchBeforeOutput: boolean;
   setAutoPatchBeforeOutput: React.Dispatch<React.SetStateAction<boolean>>;
+  autoCheckUpdates: boolean;
+  setAutoCheckUpdates: React.Dispatch<React.SetStateAction<boolean>>;
   uiSettings: UiSettings;
   setUiSettings: React.Dispatch<React.SetStateAction<UiSettings>>;
+  focusUpdatesRequest?: number;
+  initialUpdateCheck?: UpdateCheckResult | null;
 }) {
   const [selectedProviderId, setSelectedProviderId] = useState(snapshot.providers[0]?.id ?? "");
   const [advancedModelKeys, setAdvancedModelKeys] = useState<Set<string>>(new Set());
@@ -62,9 +70,13 @@ export default function SettingsView({
   const [onlineUseGithubToken, setOnlineUseGithubToken] = useState(true);
   const [selectedOnlineSourceId, setSelectedOnlineSourceId] = useState("");
   const [githubTokenDraft, setGithubTokenDraft] = useState("");
-  const [githubTokenConfigured, setGithubTokenConfigured] = useState(false);
+  const [appVersion, setAppVersion] = useState<AppVersionInfo | null>(null);
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheckResult | null>(null);
+  const [downloadedUpdate, setDownloadedUpdate] = useState<UpdateDescriptor | null>(null);
+  const [updateDownloadPercent, setUpdateDownloadPercent] = useState<number | null>(null);
   const projectSettingsRef = useRef<HTMLElement | null>(null);
   const tableSettingsRef = useRef<HTMLElement | null>(null);
+  const aboutUpdateRef = useRef<HTMLElement | null>(null);
   const uiSettingsRef = useRef<HTMLElement | null>(null);
   const onlineDictionaryRef = useRef<HTMLElement | null>(null);
   const providersSettingsRef = useRef<HTMLElement | null>(null);
@@ -93,17 +105,29 @@ export default function SettingsView({
   const selectedProvider = snapshot.providers.find((provider) => provider.id === selectedProviderId) ?? snapshot.providers[0];
   useEffect(() => {
     let cancelled = false;
-    window.bgt.loadSystemFonts()
-      .then((fonts) => {
-        if (!cancelled) setSystemFonts(fonts);
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) setFontLoadError(error instanceof Error ? error.message : String(error));
+    Promise.allSettled([window.bgt.loadSystemFonts(), window.bgt.getAppVersion()])
+      .then(([fontsResult, versionResult]) => {
+        if (cancelled) return;
+        if (fontsResult.status === "fulfilled") setSystemFonts(fontsResult.value);
+        else setFontLoadError(fontsResult.reason instanceof Error ? fontsResult.reason.message : String(fontsResult.reason));
+        if (versionResult.status === "fulfilled") {
+          setAppVersion(versionResult.value);
+          if (versionResult.value.updatePendingRestart) setDownloadedUpdate(versionResult.value.updatePendingRestart);
+        }
       });
     return () => {
       cancelled = true;
     };
   }, []);
+  useEffect(() => window.bgt.onUpdateDownloadProgress((progress) => setUpdateDownloadPercent(progress.percent)), []);
+  useEffect(() => {
+    if (focusUpdatesRequest) {
+      window.setTimeout(() => scrollToSettingsSection(aboutUpdateRef), 0);
+    }
+  }, [focusUpdatesRequest]);
+  useEffect(() => {
+    if (initialUpdateCheck?.hasUpdate) setUpdateCheck(initialUpdateCheck);
+  }, [initialUpdateCheck?.update?.targetVersion]);
   useEffect(() => {
     let cancelled = false;
     Promise.all([window.bgt.listOnlineDictionarySources(), window.bgt.getOnlineDictionaryTokenStatus()])
@@ -112,7 +136,6 @@ export default function SettingsView({
         setOnlineSources(settings.sources);
         setOnlineUseGithubToken(settings.useToken !== false);
         setSelectedOnlineSourceId(settings.sources[0]?.id ?? "");
-        setGithubTokenConfigured(tokenStatus.configured);
         if (tokenStatus.configured) setGithubTokenDraft(configuredGithubTokenPlaceholder);
       })
       .catch((error: unknown) => {
@@ -330,7 +353,6 @@ export default function SettingsView({
     const settings = await window.bgt.saveOnlineDictionarySources({ schemaVersion: 1, sources: onlineSources, useToken: onlineUseGithubToken });
     if (githubTokenDraft.trim() && githubTokenDraft !== configuredGithubTokenPlaceholder) {
       await window.bgt.saveOnlineDictionaryToken(githubTokenDraft);
-      setGithubTokenConfigured(true);
       setGithubTokenDraft(configuredGithubTokenPlaceholder);
     }
     setOnlineSources(settings.sources);
@@ -348,6 +370,27 @@ export default function SettingsView({
     if (!result.ok) throw new Error(result.message);
     return result;
   };
+  const checkSoftwareUpdate = async () => {
+    const result = await window.bgt.checkForUpdates();
+    setUpdateCheck(result);
+    setDownloadedUpdate(null);
+    if (result.error) showToast(result.error, "error");
+    else showToast(result.hasUpdate ? "发现新版本" : "当前已是最新版本");
+    return result;
+  };
+  const downloadSoftwareUpdate = async () => {
+    const update = updateCheck?.update;
+    if (!update) return;
+    setUpdateDownloadPercent(0);
+    await window.bgt.downloadUpdate(update.raw);
+    setDownloadedUpdate(update);
+    return update;
+  };
+  const applySoftwareUpdate = async () => {
+    const update = downloadedUpdate ?? updateCheck?.update;
+    if (!update) return;
+    await window.bgt.applyUpdate(update.raw);
+  };
   return (
     <div className="settings-shell">
       <nav className="settings-nav" aria-label="设置分类">
@@ -361,6 +404,7 @@ export default function SettingsView({
           系统设置
         </button>
         <div className="settings-subnav">
+          <button onClick={() => scrollToSettingsSection(aboutUpdateRef)}>关于与更新</button>
           <button onClick={() => scrollToSettingsSection(tableSettingsRef)}>全局设置</button>
           <button onClick={() => scrollToSettingsSection(uiSettingsRef)}>界面</button>
           <button onClick={() => scrollToSettingsSection(onlineDictionaryRef)}>在线仓库</button>
@@ -409,6 +453,68 @@ export default function SettingsView({
               <p>打开项目后可以编辑源语言、目标语言和首页。</p>
             </div>
           )}
+        </section>
+        <section ref={aboutUpdateRef} className="settings-section">
+          <div className="panel">
+            <h2>关于与更新</h2>
+            <div className="settings-form">
+              <FieldRow label="当前版本" description={appVersion?.installedByUpdater ? `Velopack ${appVersion.isPortable ? "便携版" : "安装版"}${appVersion.appId ? ` · ${appVersion.appId}` : ""}` : "当前运行环境不支持应用内更新。"}>
+                <input value={appVersion?.currentVersion ?? "读取中..."} disabled />
+              </FieldRow>
+              <FieldRow label="启动时自动检查更新" description="开启后，每次打开软件时会检查 GitHub Releases；发现新版本时弹出提示。">
+                <ToggleSwitch checked={autoCheckUpdates} onChange={setAutoCheckUpdates} />
+              </FieldRow>
+              <FieldRow label="更新状态" description={updateCheck?.error || appVersion?.error || (downloadedUpdate ? `已准备好 ${downloadedUpdate.targetVersion}` : updateCheck?.hasUpdate ? `发现 ${updateCheck.update?.targetVersion}` : "手动检查 GitHub Releases 上的 Velopack 更新包。")}>
+                <input
+                  value={
+                    downloadedUpdate
+                      ? "更新已下载，等待重启应用"
+                      : updateCheck
+                        ? updateCheck.hasUpdate
+                          ? "有可用更新"
+                          : updateCheck.error
+                            ? "检查失败"
+                            : "当前已是最新版本"
+                        : "尚未检查"
+                  }
+                  disabled
+                />
+              </FieldRow>
+              {updateCheck?.update ? (
+                <FieldRow label="可用版本" description={updateCheck.update.packageFileName ? `${updateCheck.update.packageFileName}${updateCheck.update.packageSize ? ` · ${formatBytes(updateCheck.update.packageSize)}` : ""}` : "Velopack 更新包"}>
+                  <input value={updateCheck.update.targetVersion} disabled />
+                </FieldRow>
+              ) : null}
+              {updateDownloadPercent !== null && !downloadedUpdate ? (
+                <FieldRow label="下载进度" description="下载完成后可以重启并应用更新。">
+                  <input value={`${Math.round(updateDownloadPercent)}%`} disabled />
+                </FieldRow>
+              ) : null}
+              {updateCheck?.update?.releaseNotes ? (
+                <FieldRow label="更新说明" description="来自 Velopack release notes。">
+                  <textarea value={updateCheck.update.releaseNotes} disabled rows={5} />
+                </FieldRow>
+              ) : null}
+              <div className="button-row">
+                <button className="secondary-button" onClick={() => run("检查软件更新", checkSoftwareUpdate)}>
+                  <RefreshCw size={16} />
+                  检查更新
+                </button>
+                <button className="secondary-button" disabled={!updateCheck?.update || Boolean(downloadedUpdate)} onClick={() => run("下载软件更新", downloadSoftwareUpdate, () => showToast("更新已下载"))}>
+                  <Download size={16} />
+                  下载更新
+                </button>
+                <button disabled={!downloadedUpdate} onClick={() => run("重启并应用更新", applySoftwareUpdate)}>
+                  <RotateCcw size={16} />
+                  重启并应用
+                </button>
+                <button className="secondary-button" onClick={() => void window.bgt.openExternal("https://github.com/Heptagon196/BrowserGameTranslator/releases")}>
+                  <ExternalLink size={16} />
+                  打开 Releases
+                </button>
+              </div>
+            </div>
+          </div>
         </section>
         <section ref={tableSettingsRef} className="settings-section">
           <div className="panel">
@@ -832,6 +938,18 @@ export default function SettingsView({
 
 function isReadonlyOnlineSource(source: OnlineDictionarySource): boolean {
   return source.readonly === true || source.id === "official";
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
 

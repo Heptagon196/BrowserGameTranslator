@@ -1041,6 +1041,23 @@ label {
   margin-top: 14px;
 }
 
+.software-update-modal .markdown-preview {
+  max-height: min(42vh, 420px);
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid #d1d8df;
+  border-radius: 8px;
+  background: #f8fafb;
+}
+
+.software-update-modal .markdown-preview :first-child {
+  margin-top: 0;
+}
+
+.software-update-modal .markdown-preview :last-child {
+  margin-bottom: 0;
+}
+
 .ai-review-scope-dialog {
   max-width: 460px;
 }
