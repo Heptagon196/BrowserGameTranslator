@@ -235,6 +235,12 @@ npm run package:portable
 
 这个命令会先构建应用、编译内置启动器，再生成 Windows 应用目录，并用 Velopack 打出可自更新的便携版包。
 
+正式发布新版时，建议先拉取远端已有 Velopack 资产，让 `vpk pack` 自动生成 delta 增量包：
+
+```powershell
+npm run package:portable:release
+```
+
 便携版输出到：
 
 ```text
@@ -247,7 +253,6 @@ release/velopack/BrowserGameTranslator-win-Portable.zip
 release/velopack/BrowserGameTranslator-win-Portable.zip
 release/velopack/BrowserGameTranslator-0.1.0-full.nupkg
 release/velopack/releases.win.json
-release/velopack/assets.win.json
 ```
 
 推荐用 Velopack CLI 发布到 GitHub Releases，避免漏传更新索引：
@@ -261,8 +266,7 @@ npm run velopack:upload:github
 如果需要生成 delta 包，打包前先拉取远端最新 Velopack 资产：
 
 ```powershell
-npm run velopack:download:github
-npm run package:portable
+npm run package:portable:release
 npm run velopack:upload:github
 ```
 

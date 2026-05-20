@@ -1,4 +1,5 @@
 import { AnalysisResult, CharacterNameAmbiguity, PromptConfig, ProofreadIssue, ProviderConfig, TextItem } from "../shared/types";
+import { networkFetch } from "./networkProxyService";
 import { extractHtmlTags, extractPlaceholders } from "./textAnalysisUtils";
 
 type ChatUsage = {
@@ -395,7 +396,7 @@ export async function chatCompletion(provider: ProviderConfig, messages: Array<{
   if (!provider.apiKey.trim()) throw new Error("API Key is required.");
   const baseUrl = provider.baseUrl.replace(/\/$/, "");
   const body = createChatBody(provider, messages);
-  const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+  const response = await networkFetch(`${baseUrl}/v1/chat/completions`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -429,7 +430,7 @@ export async function chatCompletionWithTools(
     }
   }));
   body.tool_choice = "auto";
-  const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+  const response = await networkFetch(`${baseUrl}/v1/chat/completions`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -480,7 +481,7 @@ export async function chatCompletionWithToolsStream(
     }
   }));
   body.tool_choice = "auto";
-  const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+  const response = await networkFetch(`${baseUrl}/v1/chat/completions`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -581,7 +582,7 @@ export async function chatCompletionStream(
   if (!provider.apiKey.trim()) throw new Error("API Key is required.");
   const baseUrl = provider.baseUrl.replace(/\/$/, "");
   const body = createChatBody(provider, messages, true);
-  const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+  const response = await networkFetch(`${baseUrl}/v1/chat/completions`, {
     method: "POST",
     headers: {
       "content-type": "application/json",

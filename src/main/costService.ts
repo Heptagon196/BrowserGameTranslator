@@ -1,4 +1,5 @@
 import { AiBalanceSnapshot, ProviderConfig } from "../shared/types";
+import { networkFetch } from "./networkProxyService";
 
 export async function loadProviderBalance(provider: ProviderConfig): Promise<AiBalanceSnapshot> {
   if (provider.type !== "deepseek") {
@@ -13,7 +14,7 @@ export async function loadProviderBalance(provider: ProviderConfig): Promise<AiB
     return { providerId: provider.id, isAvailable: false, balances: [], error: "请先填写 DeepSeek API Key。" };
   }
   const baseUrl = provider.baseUrl.replace(/\/$/, "");
-  const response = await fetch(`${baseUrl}/user/balance`, {
+  const response = await networkFetch(`${baseUrl}/user/balance`, {
     headers: {
       accept: "application/json",
       authorization: `Bearer ${provider.apiKey}`

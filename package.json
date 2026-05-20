@@ -13,6 +13,7 @@
     "package:dir": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false ELECTRON_CACHE=.cache/electron ELECTRON_BUILDER_CACHE=.cache/electron-builder electron-builder --win dir --x64",
     "package:velopack": "node scripts/package-velopack.cjs",
     "package:portable": "npm run build && npm run build:launcher && npm run package:dir && npm run package:velopack",
+    "package:portable:release": "npm run velopack:download:github && npm run package:portable",
     "velopack:download:github": "vpk download github --outputDir release/velopack --repoUrl https://github.com/Heptagon196/BrowserGameTranslator",
     "velopack:upload:github": "vpk upload github --outputDir release/velopack --repoUrl https://github.com/Heptagon196/BrowserGameTranslator --merge",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.main.json",

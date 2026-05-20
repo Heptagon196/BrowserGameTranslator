@@ -1,6 +1,6 @@
 ﻿import React, { useEffect, useRef, useState } from "react";
 import { Download, ExternalLink, Plus, RefreshCw, RotateCcw, Save, Trash2 } from "lucide-react";
-import type { AppStateSnapshot, AppVersionInfo, OnlineDictionarySource, ProviderConfig, UpdateCheckResult, UpdateDescriptor } from "../../shared/types";
+import type { AppStateSnapshot, AppVersionInfo, NetworkProxySettings, OnlineDictionarySource, ProviderConfig, UpdateCheckResult, UpdateDescriptor } from "../../shared/types";
 import { CommandSelect, FontSelect, FontSizeControl } from "../components/ui/Selectors";
 import { FieldRow } from "../components/ui/Form";
 import { StyledSelect, ToggleSwitch } from "../components/ui/Primitives";
@@ -25,6 +25,14 @@ import {
   type UiSettings
 } from "../settingsModel";
 const configuredGithubTokenPlaceholder = "configured-token";
+const defaultNetworkProxySettings: NetworkProxySettings = {
+  schemaVersion: 1,
+  enabled: false,
+  protocol: "http",
+  host: "",
+  port: 7890,
+  bypassList: "localhost;127.0.0.1;<local>"
+};
 
 export default function SettingsView({
   snapshot,
@@ -73,10 +81,13 @@ export default function SettingsView({
   const [appVersion, setAppVersion] = useState<AppVersionInfo | null>(null);
   const [updateCheck, setUpdateCheck] = useState<UpdateCheckResult | null>(null);
   const [downloadedUpdate, setDownloadedUpdate] = useState<UpdateDescriptor | null>(null);
+  const [updateDownloadInProgress, setUpdateDownloadInProgress] = useState(false);
   const [updateDownloadPercent, setUpdateDownloadPercent] = useState<number | null>(null);
+  const [networkProxySettings, setNetworkProxySettings] = useState<NetworkProxySettings | null>(null);
   const projectSettingsRef = useRef<HTMLElement | null>(null);
   const tableSettingsRef = useRef<HTMLElement | null>(null);
   const aboutUpdateRef = useRef<HTMLElement | null>(null);
+  const networkProxyRef = useRef<HTMLElement | null>(null);
   const uiSettingsRef = useRef<HTMLElement | null>(null);
   const onlineDictionaryRef = useRef<HTMLElement | null>(null);
   const providersSettingsRef = useRef<HTMLElement | null>(null);
@@ -114,6 +125,19 @@ export default function SettingsView({
           setAppVersion(versionResult.value);
           if (versionResult.value.updatePendingRestart) setDownloadedUpdate(versionResult.value.updatePendingRestart);
         }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    window.bgt.loadNetworkProxySettings()
+      .then((settings) => {
+        if (!cancelled) setNetworkProxySettings(settings);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) showToast(error instanceof Error ? error.message : String(error), "error");
       });
     return () => {
       cancelled = true;
@@ -380,17 +404,38 @@ export default function SettingsView({
   };
   const downloadSoftwareUpdate = async () => {
     const update = updateCheck?.update;
-    if (!update) return;
-    setUpdateDownloadPercent(0);
-    await window.bgt.downloadUpdate(update.raw);
-    setDownloadedUpdate(update);
-    return update;
+    if (!update || updateDownloadInProgress) return;
+    setUpdateDownloadInProgress(true);
+    try {
+      setUpdateDownloadPercent(0);
+      await window.bgt.downloadUpdate(update.raw);
+      setDownloadedUpdate(update);
+      return update;
+    } finally {
+      setUpdateDownloadInProgress(false);
+    }
   };
   const applySoftwareUpdate = async () => {
     const update = downloadedUpdate ?? updateCheck?.update;
     if (!update) return;
     await window.bgt.applyUpdate(update.raw);
   };
+  const updateNetworkProxySettings = (patch: Partial<NetworkProxySettings>) => {
+    setNetworkProxySettings((current) => ({ ...(current ?? defaultNetworkProxySettings), ...patch }));
+  };
+  const saveNetworkProxySettings = async () => {
+    const settings = networkProxySettings ?? defaultNetworkProxySettings;
+    const host = settings.host.trim();
+    if (settings.enabled && !host) throw new Error("启用代理时需要填写代理主机。");
+    if (settings.enabled && (!Number.isFinite(settings.port) || settings.port < 1 || settings.port > 65535)) {
+      throw new Error("代理端口需要在 1 到 65535 之间。");
+    }
+    const saved = await window.bgt.saveNetworkProxySettings({ ...settings, host });
+    setNetworkProxySettings(saved);
+    return saved;
+  };
+  const displayedNetworkProxySettings = networkProxySettings ?? defaultNetworkProxySettings;
+  const networkProxyLoaded = Boolean(networkProxySettings);
   return (
     <div className="settings-shell">
       <nav className="settings-nav" aria-label="设置分类">
@@ -405,6 +450,7 @@ export default function SettingsView({
         </button>
         <div className="settings-subnav">
           <button onClick={() => scrollToSettingsSection(aboutUpdateRef)}>关于与更新</button>
+          <button onClick={() => scrollToSettingsSection(networkProxyRef)}>网络代理</button>
           <button onClick={() => scrollToSettingsSection(tableSettingsRef)}>全局设置</button>
           <button onClick={() => scrollToSettingsSection(uiSettingsRef)}>界面</button>
           <button onClick={() => scrollToSettingsSection(onlineDictionaryRef)}>在线仓库</button>
@@ -464,11 +510,13 @@ export default function SettingsView({
               <FieldRow label="启动时自动检查更新" description="开启后，每次打开软件时会检查 GitHub Releases；发现新版本时弹出提示。">
                 <ToggleSwitch checked={autoCheckUpdates} onChange={setAutoCheckUpdates} />
               </FieldRow>
-              <FieldRow label="更新状态" description={updateCheck?.error || appVersion?.error || (downloadedUpdate ? `已准备好 ${downloadedUpdate.targetVersion}` : updateCheck?.hasUpdate ? `发现 ${updateCheck.update?.targetVersion}` : "手动检查 GitHub Releases 上的 Velopack 更新包。")}>
+              <FieldRow label="更新状态" description={updateCheck?.error || appVersion?.error || (downloadedUpdate ? `已准备好 ${downloadedUpdate.targetVersion}` : updateDownloadInProgress ? "正在下载更新包，请等待完成。" : updateCheck?.hasUpdate ? `发现 ${updateCheck.update?.targetVersion}` : "手动检查 GitHub Releases 上的 Velopack 更新包。")}>
                 <input
                   value={
                     downloadedUpdate
                       ? "更新已下载，等待重启应用"
+                      : updateDownloadInProgress
+                        ? "正在下载更新"
                       : updateCheck
                         ? updateCheck.hasUpdate
                           ? "有可用更新"
@@ -500,17 +548,65 @@ export default function SettingsView({
                   <RefreshCw size={16} />
                   检查更新
                 </button>
-                <button className="secondary-button" disabled={!updateCheck?.update || Boolean(downloadedUpdate)} onClick={() => run("下载软件更新", downloadSoftwareUpdate, () => showToast("更新已下载"))}>
+                <button className="secondary-button" disabled={!updateCheck?.update || Boolean(downloadedUpdate) || updateDownloadInProgress} onClick={() => run("下载软件更新", downloadSoftwareUpdate, () => showToast("更新已下载"))}>
                   <Download size={16} />
-                  下载更新
+                  {updateDownloadInProgress ? "下载中" : "下载更新"}
                 </button>
-                <button disabled={!downloadedUpdate} onClick={() => run("重启并应用更新", applySoftwareUpdate)}>
+                <button disabled={!downloadedUpdate || updateDownloadInProgress} onClick={() => run("重启并应用更新", applySoftwareUpdate)}>
                   <RotateCcw size={16} />
                   重启并应用
                 </button>
                 <button className="secondary-button" onClick={() => void window.bgt.openExternal("https://github.com/Heptagon196/BrowserGameTranslator/releases")}>
                   <ExternalLink size={16} />
                   打开 Releases
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section ref={networkProxyRef} className="settings-section">
+          <div className="panel">
+            <h2>网络代理</h2>
+            <div className="settings-form">
+              <FieldRow label="启用代理" description="开启后，应用内网络请求会通过这里配置的代理访问。支持 HTTP 和 SOCKS5。">
+                <ToggleSwitch checked={displayedNetworkProxySettings.enabled} disabled={!networkProxyLoaded} onChange={(enabled) => updateNetworkProxySettings({ enabled })} />
+              </FieldRow>
+              <FieldRow label="代理类型" description="HTTP 代理会同时用于 HTTP/HTTPS 请求；SOCKS5 会作为全局代理规则。">
+                <StyledSelect
+                  value={displayedNetworkProxySettings.protocol}
+                  options={[
+                    { value: "http", label: "HTTP" },
+                    { value: "socks5", label: "SOCKS5" }
+                  ]}
+                  disabled={!networkProxyLoaded}
+                  onChange={(protocol) => updateNetworkProxySettings({ protocol: protocol === "socks5" ? "socks5" : "http" })}
+                />
+              </FieldRow>
+              <FieldRow label="代理主机" description="例如 127.0.0.1。不要包含 http:// 或 socks5://。">
+                <input value={displayedNetworkProxySettings.host} disabled={!networkProxyLoaded} placeholder={networkProxyLoaded ? "127.0.0.1" : "读取中..."} onChange={(event) => updateNetworkProxySettings({ host: event.target.value })} />
+              </FieldRow>
+              <FieldRow label="代理端口" description="例如 7890、1080。">
+                <input
+                  type="number"
+                  min="1"
+                  max="65535"
+                  step="1"
+                  value={displayedNetworkProxySettings.port}
+                  disabled={!networkProxyLoaded}
+                  onChange={(event) => updateNetworkProxySettings({ port: Number(event.target.value) })}
+                />
+              </FieldRow>
+              <FieldRow label="绕过列表" description="分号分隔。默认绕过 localhost、127.0.0.1 和本地地址。">
+                <input value={displayedNetworkProxySettings.bypassList} disabled={!networkProxyLoaded} onChange={(event) => updateNetworkProxySettings({ bypassList: event.target.value })} />
+              </FieldRow>
+              <div className="button-row">
+                <button disabled={!networkProxyLoaded} onClick={() => run("保存网络代理设置", saveNetworkProxySettings, () => showToast("网络代理设置已保存"))}>
+                  <Save size={16} />
+                  保存代理设置
+                </button>
+                <button className="secondary-button" disabled={!networkProxyLoaded} onClick={() => setNetworkProxySettings(defaultNetworkProxySettings)}>
+                  <RotateCcw size={16} />
+                  恢复默认
                 </button>
               </div>
             </div>

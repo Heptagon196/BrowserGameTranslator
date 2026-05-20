@@ -1,18 +1,21 @@
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream, existsSync } from "node:fs";
-import { mkdir, stat } from "node:fs/promises";
-import http from "node:http";
-import https from "node:https";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { app, BrowserWindow } from "electron";
 import type { UpdateInfo, VelopackAsset } from "velopack";
 import { UpdateManager, VelopackApp } from "velopack";
 import type { AppVersionInfo, UpdateCheckResult, UpdateDescriptor, UpdateDownloadProgress } from "../shared/types";
+import { networkFetch } from "./networkProxyService";
 
 const githubRepoUrl = "https://github.com/Heptagon196/BrowserGameTranslator";
-const latestReleaseApiUrl = "https://api.github.com/repos/Heptagon196/BrowserGameTranslator/releases/latest";
+const releasesApiUrl = "https://api.github.com/repos/Heptagon196/BrowserGameTranslator/releases?per_page=20";
 const releaseFeedAssetName = "releases.win.json";
+let updateDownloadPromise: Promise<void> | null = null;
 
 interface GitHubReleaseAsset {
   name: string;
@@ -82,7 +85,9 @@ export async function checkForUpdates(): Promise<UpdateCheckResult> {
   }
 
   try {
-    const release = await fetchLatestGitHubRelease();
+    const releases = await fetchGitHubReleases();
+    const release = releases[0];
+    if (!release) throw new Error("GitHub Releases 中没有可用的稳定版本。");
     const feedAsset = release.assets.find((asset) => asset.name === releaseFeedAssetName);
     if (!feedAsset) {
       return {
@@ -93,7 +98,7 @@ export async function checkForUpdates(): Promise<UpdateCheckResult> {
       };
     }
 
-    const update = await checkGitHubReleaseForUpdate(versionInfo, release, feedAsset);
+    const update = await checkGitHubReleaseForUpdate(versionInfo, release, releases, feedAsset);
     return {
       currentVersion: versionInfo.currentVersion,
       installedByUpdater: true,
@@ -111,23 +116,11 @@ export async function checkForUpdates(): Promise<UpdateCheckResult> {
 }
 
 export async function downloadUpdate(update: unknown): Promise<void> {
-  const githubUpdate = asGitHubUpdatePayload(update);
-  if (githubUpdate) {
-    const target = githubUpdate.updateInfo.TargetFullRelease;
-    const downloadUrl = githubUpdate.packageUrls[target.FileName];
-    if (!downloadUrl) throw new Error(`GitHub Release 缺少更新包 ${target.FileName}。`);
-    const packagePath = join(getVelopackPackagesDir(), target.FileName);
-    await mkdir(dirname(packagePath), { recursive: true });
-    await downloadFile(downloadUrl, packagePath, target.Size);
-    await verifyPackage(packagePath, target);
-    publishDownloadProgress({ percent: 100 });
-    return;
-  }
-
-  await createUpdateManager().downloadUpdateAsync(update as UpdateInfo, (percent) => {
-    publishDownloadProgress({ percent });
+  if (updateDownloadPromise) return updateDownloadPromise;
+  updateDownloadPromise = runUpdateDownload(update).finally(() => {
+    updateDownloadPromise = null;
   });
-  publishDownloadProgress({ percent: 100 });
+  return updateDownloadPromise;
 }
 
 export function applyUpdate(update: unknown): void {
@@ -165,41 +158,81 @@ function descriptorFromAsset(asset: VelopackAsset): UpdateDescriptor {
   };
 }
 
+async function runUpdateDownload(update: unknown): Promise<void> {
+  const githubUpdate = asGitHubUpdatePayload(update);
+  if (githubUpdate) {
+    if (githubUpdate.updateInfo.DeltasToTarget.length > 0) {
+      try {
+        await downloadDeltaUpdateWithVelopack(githubUpdate);
+        publishDownloadProgress({ percent: 100 });
+        return;
+      } catch (error) {
+        console.warn(`Velopack delta update failed, falling back to full package: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    const target = githubUpdate.updateInfo.TargetFullRelease;
+    const downloadUrl = githubUpdate.packageUrls[target.FileName];
+    if (!downloadUrl) throw new Error(`GitHub Release 缺少更新包 ${target.FileName}。`);
+    const packagePath = join(getVelopackPackagesDir(), target.FileName);
+    await mkdir(dirname(packagePath), { recursive: true });
+    await downloadFile(downloadUrl, packagePath, target.Size);
+    await verifyPackage(packagePath, target);
+    publishDownloadProgress({ percent: 100 });
+    return;
+  }
+
+  await createUpdateManager().downloadUpdateAsync(update as UpdateInfo, (percent) => {
+    publishDownloadProgress({ percent });
+  });
+  publishDownloadProgress({ percent: 100 });
+}
+
 function publishDownloadProgress(progress: UpdateDownloadProgress): void {
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.webContents.isDestroyed()) window.webContents.send("updates:download-progress", progress);
   }
 }
 
-async function fetchLatestGitHubRelease(): Promise<LatestGitHubRelease> {
-  const response = await fetch(latestReleaseApiUrl, {
+async function fetchGitHubReleases(): Promise<LatestGitHubRelease[]> {
+  const response = await networkFetch(releasesApiUrl, {
     headers: {
       "Accept": "application/vnd.github+json",
       "User-Agent": "BrowserGameTranslator"
     }
   });
-  if (!response.ok) throw new Error(`GitHub Release 读取失败：HTTP ${response.status}`);
-  const payload = await response.json() as {
+  if (!response.ok) throw new Error(`GitHub Releases 读取失败：HTTP ${response.status}`);
+  const payload = await response.json() as Array<{
     assets?: Array<{ browser_download_url?: unknown; name?: unknown; size?: unknown }>;
     body?: unknown;
+    draft?: unknown;
     html_url?: unknown;
+    prerelease?: unknown;
     tag_name?: unknown;
-  };
-  const assets = Array.isArray(payload.assets)
-    ? payload.assets
-      .map((asset) => ({
-        browserDownloadUrl: typeof asset.browser_download_url === "string" ? asset.browser_download_url : "",
-        name: typeof asset.name === "string" ? asset.name : "",
-        size: typeof asset.size === "number" ? asset.size : 0
-      }))
+  }>;
+  if (!Array.isArray(payload)) throw new Error("GitHub Releases 返回格式不正确。");
+  return payload
+    .filter((release) => !release.draft && !release.prerelease)
+    .map((release) => ({
+      body: typeof release.body === "string" ? release.body : "",
+      htmlUrl: typeof release.html_url === "string" ? release.html_url : "",
+      tagName: typeof release.tag_name === "string" ? release.tag_name : "",
+      assets: normalizeGitHubReleaseAssets(release.assets)
+    }));
+}
+
+function normalizeGitHubReleaseAssets(assets: unknown): GitHubReleaseAsset[] {
+  return Array.isArray(assets)
+    ? assets
+      .map((asset) => {
+        const value = asset as { browser_download_url?: unknown; name?: unknown; size?: unknown };
+        return {
+          browserDownloadUrl: typeof value.browser_download_url === "string" ? value.browser_download_url : "",
+          name: typeof value.name === "string" ? value.name : "",
+          size: typeof value.size === "number" ? value.size : 0
+        };
+      })
       .filter((asset) => asset.name.length > 0 && asset.browserDownloadUrl.length > 0)
     : [];
-  return {
-    body: typeof payload.body === "string" ? payload.body : "",
-    htmlUrl: typeof payload.html_url === "string" ? payload.html_url : "",
-    tagName: typeof payload.tag_name === "string" ? payload.tag_name : "",
-    assets
-  };
 }
 
 function missingReleaseFeedMessage(release: LatestGitHubRelease): string {
@@ -209,33 +242,36 @@ function missingReleaseFeedMessage(release: LatestGitHubRelease): string {
   return `GitHub ${releaseName} 缺少 Velopack 更新索引 ${releaseFeedAssetName}，无法应用内检查更新。请把 release/velopack/${releaseFeedAssetName} 和对应的 .nupkg 一起上传到最新 Release。${assetList}`;
 }
 
-async function checkGitHubReleaseForUpdate(versionInfo: AppVersionInfo, release: LatestGitHubRelease, feedAsset: GitHubReleaseAsset): Promise<GitHubUpdatePayload | null> {
+async function checkGitHubReleaseForUpdate(versionInfo: AppVersionInfo, release: LatestGitHubRelease, releases: LatestGitHubRelease[], feedAsset: GitHubReleaseAsset): Promise<GitHubUpdatePayload | null> {
   const feed = await fetchVelopackAssetFeed(feedAsset);
-  const packageUrls = Object.fromEntries(release.assets.map((asset) => [asset.name, asset.browserDownloadUrl]));
+  const packageUrls = Object.fromEntries(releases.flatMap((entry) => entry.assets).map((asset) => [asset.name, asset.browserDownloadUrl]));
   const appId = versionInfo.appId;
-  const fullReleases = (feed.Assets ?? [])
-    .filter((asset) => asset.Type.toLowerCase() === "full")
-    .filter((asset) => !appId || asset.PackageId === appId)
-    .filter((asset) => compareVersions(asset.Version, versionInfo.currentVersion) > 0)
-    .sort((left, right) => compareVersions(right.Version, left.Version));
-  const target = fullReleases[0];
-  if (!target) return null;
-  if (!packageUrls[target.FileName]) {
-    throw new Error(`GitHub Release 中的 ${releaseFeedAssetName} 指向 ${target.FileName}，但最新 Release 没有上传这个资产。`);
+  const releaseAssets = (feed.Assets ?? [])
+    .filter((asset) => !appId || asset.PackageId === appId);
+  const updateInfo = await resolveUpdateInfoWithVelopack(releaseAssets);
+  if (!updateInfo) return null;
+  if (!packageUrls[updateInfo.TargetFullRelease.FileName]) {
+    throw new Error(`GitHub Release 中的 ${releaseFeedAssetName} 指向 ${updateInfo.TargetFullRelease.FileName}，但 Release 资产里没有上传这个文件。`);
   }
   return {
     source: "github-release",
-    updateInfo: {
-      TargetFullRelease: target,
-      DeltasToTarget: [],
-      IsDowngrade: false
-    },
+    updateInfo,
     packageUrls
   };
 }
 
+async function resolveUpdateInfoWithVelopack(assets: VelopackAsset[]): Promise<UpdateInfo | null> {
+  const sourceDir = await mkdtemp(join(tmpdir(), "bgt-velopack-feed-"));
+  try {
+    await writeReleaseFeed(sourceDir, assets);
+    return await new UpdateManager(sourceDir).checkForUpdatesAsync();
+  } finally {
+    await rm(sourceDir, { recursive: true, force: true });
+  }
+}
+
 async function fetchVelopackAssetFeed(asset: GitHubReleaseAsset): Promise<VelopackAssetFeed> {
-  const response = await fetch(asset.browserDownloadUrl, {
+  const response = await networkFetch(asset.browserDownloadUrl, {
     headers: {
       "Accept": "application/json",
       "User-Agent": "BrowserGameTranslator"
@@ -263,38 +299,59 @@ function getVelopackPackagesDir(): string {
   return join(exeDir, "packages");
 }
 
-async function downloadFile(url: string, destination: string, expectedSize?: number): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const request = (currentUrl: string, redirectCount: number) => {
-      const parsed = new URL(currentUrl);
-      const transport = parsed.protocol === "http:" ? http : https;
-      const req = transport.get(parsed, { headers: { "User-Agent": "BrowserGameTranslator" } }, (response) => {
-        if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-          response.resume();
-          if (redirectCount <= 0) {
-            reject(new Error("GitHub Release 下载重定向次数过多。"));
-            return;
-          }
-          request(new URL(response.headers.location, currentUrl).toString(), redirectCount - 1);
-          return;
-        }
-        if (response.statusCode !== 200) {
-          response.resume();
-          reject(new Error(`GitHub Release 下载失败：HTTP ${response.statusCode ?? "unknown"}`));
-          return;
-        }
-        const total = expectedSize || Number(response.headers["content-length"]) || 0;
-        let downloaded = 0;
-        response.on("data", (chunk: Buffer) => {
-          downloaded += chunk.length;
-          if (total > 0) publishDownloadProgress({ percent: Math.min(99, Math.round((downloaded / total) * 100)) });
-        });
-        pipeline(response, createWriteStream(destination)).then(resolve, reject);
+async function downloadDeltaUpdateWithVelopack(update: GitHubUpdatePayload): Promise<void> {
+  const sourceDir = await mkdtemp(join(tmpdir(), "bgt-velopack-delta-"));
+  try {
+    await writeReleaseFeed(sourceDir, [
+      update.updateInfo.BaseRelease,
+      ...update.updateInfo.DeltasToTarget,
+      update.updateInfo.TargetFullRelease
+    ].filter(Boolean) as VelopackAsset[]);
+    const assets = update.updateInfo.DeltasToTarget;
+    const totalBytes = assets.reduce((sum, asset) => sum + Math.max(asset.Size, 0), 0);
+    let completedBytes = 0;
+    for (const asset of assets) {
+      const url = update.packageUrls[asset.FileName];
+      if (!url) throw new Error(`GitHub Release 缺少增量更新包 ${asset.FileName}。`);
+      const destination = join(sourceDir, asset.FileName);
+      await downloadFile(url, destination, asset.Size, (bytes) => {
+        if (totalBytes > 0) publishDownloadProgress({ percent: Math.min(70, Math.round(((completedBytes + bytes) / totalBytes) * 70)) });
       });
-      req.on("error", reject);
-    };
-    request(url, 5);
+      await verifyPackage(destination, asset);
+      completedBytes += Math.max(asset.Size, 0);
+    }
+    await new UpdateManager(sourceDir).downloadUpdateAsync(update.updateInfo, (percent) => {
+      publishDownloadProgress({ percent: Math.min(99, 70 + Math.round(percent * 0.29)) });
+    });
+    await verifyPackage(join(getVelopackPackagesDir(), update.updateInfo.TargetFullRelease.FileName), update.updateInfo.TargetFullRelease);
+  } finally {
+    await rm(sourceDir, { recursive: true, force: true });
+  }
+}
+
+async function writeReleaseFeed(sourceDir: string, assets: VelopackAsset[]): Promise<void> {
+  await writeFile(join(sourceDir, releaseFeedAssetName), JSON.stringify({ Assets: assets }), "utf-8");
+}
+
+async function downloadFile(url: string, destination: string, expectedSize?: number, onProgress?: (bytes: number) => void): Promise<void> {
+  const response = await networkFetch(url, {
+    headers: {
+      "User-Agent": "BrowserGameTranslator"
+    }
   });
+  if (!response.ok) throw new Error(`GitHub Release 下载失败：HTTP ${response.status}`);
+  if (!response.body) throw new Error("GitHub Release 下载失败：响应体为空。");
+  const total = expectedSize || Number(response.headers.get("content-length")) || 0;
+  let downloaded = 0;
+  const progress = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      downloaded += chunk.length;
+      if (onProgress) onProgress(downloaded);
+      else if (total > 0) publishDownloadProgress({ percent: Math.min(99, Math.round((downloaded / total) * 100)) });
+      callback(null, chunk);
+    }
+  });
+  await pipeline(Readable.fromWeb(response.body as unknown as NodeReadableStream<Uint8Array>), progress, createWriteStream(destination));
 }
 
 async function verifyPackage(filePath: string, asset: VelopackAsset): Promise<void> {
@@ -315,27 +372,6 @@ async function hashFile(filePath: string, algorithm: "sha1" | "sha256"): Promise
   const hash = createHash(algorithm);
   await pipeline(createReadStream(filePath), hash);
   return hash.digest("hex").toUpperCase();
-}
-
-function compareVersions(left: string, right: string): number {
-  const leftParts = parseVersion(left);
-  const rightParts = parseVersion(right);
-  for (let index = 0; index < Math.max(leftParts.numbers.length, rightParts.numbers.length); index += 1) {
-    const diff = (leftParts.numbers[index] ?? 0) - (rightParts.numbers[index] ?? 0);
-    if (diff !== 0) return diff;
-  }
-  if (leftParts.prerelease === rightParts.prerelease) return 0;
-  if (!leftParts.prerelease) return 1;
-  if (!rightParts.prerelease) return -1;
-  return leftParts.prerelease.localeCompare(rightParts.prerelease);
-}
-
-function parseVersion(version: string): { numbers: number[]; prerelease: string } {
-  const [core, prerelease = ""] = version.split("-", 2);
-  return {
-    numbers: core.split(".").map((part) => Number.parseInt(part, 10)).map((part) => Number.isFinite(part) ? part : 0),
-    prerelease
-  };
 }
 
 function userFacingUpdateError(error: unknown): string {

@@ -1,7 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { BrowserWindow, net } from "electron";
+import { BrowserWindow } from "electron";
 import { WebGameDownloadEvent, WebGameDownloadInput, WebGameDownloadProgress, WebGameDownloadResult } from "../shared/types";
+import { networkFetch } from "./networkProxyService";
 
 const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
 const assetExtensions = /\.(png|jpg|jpeg|gif|svg|webp|avif|ico|mp3|ogg|wav|m4a|flac|mp4|webm|json|xml|atlas|fnt|wasm|css|js|mjs|glsl|vert|frag|bin|dat|tmx|tsx|woff|woff2|ttf|otf|eot)$/i;
@@ -413,12 +414,9 @@ function normalizeResourceUrl(ref: string, baseUrl: string): string | undefined 
 
 function localPathForUrl(url: URL, rootUrl: string): string | undefined {
   const root = new URL(rootUrl);
-  let relative = "";
-  if (url.pathname.startsWith(root.pathname)) {
-    relative = url.pathname.slice(root.pathname.length);
-  } else {
-    relative = url.pathname.replace(/^\/+/, "");
-  }
+  const relative = url.pathname.startsWith(root.pathname)
+    ? url.pathname.slice(root.pathname.length)
+    : url.pathname.replace(/^\/+/, "");
   return sanitizeAssetPath(decodeURIComponent(relative));
 }
 
@@ -519,7 +517,7 @@ export async function validateWebGameOutputDirectory(outputPath: string): Promis
 
 function electronFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const target = input instanceof URL ? input.toString() : (input as string | Request);
-  return net.fetch(target, init as Parameters<typeof net.fetch>[1]);
+  return networkFetch(target, init);
 }
 
 function isPathInsideOrSame(child: string, parent: string): boolean {

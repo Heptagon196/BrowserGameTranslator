@@ -27,6 +27,7 @@ import { defaultProofreadOptions, proofreadItems } from "./proofread";
 import { appendLog, projectDirs, projectPaths, saveAnalysis, writeJsonl } from "./storage";
 import { isWebSearchCdpHostProcess, runWebSearchCdpHost } from "./webSearchCdpHost";
 import { applyUpdate as applySoftwareUpdate, checkForUpdates as checkForSoftwareUpdates, downloadUpdate as downloadSoftwareUpdate, getAppVersionInfo, runVelopackStartup } from "./updateService";
+import { applySavedNetworkProxySettings, loadNetworkProxySettings, saveNetworkProxySettings } from "./networkProxyService";
 import {
   AaOfflineDownloadInput,
   AgentChatHistoryItem,
@@ -49,6 +50,7 @@ import {
   ExtractionDecision,
   ExtractionRulePackage,
   ExtractionRuleScope,
+  NetworkProxySettings,
   TextItem,
   WebGameDownloadInput
 } from "../shared/types";
@@ -170,7 +172,10 @@ function isPathInsideOrSame(child: string, parent: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(async () => {
+  await applySavedNetworkProxySettings();
+  await createWindow();
+});
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
@@ -237,6 +242,8 @@ ipcMain.handle("agent:history:load", async () => agentChatHistoryService.load())
 ipcMain.handle("agent:history:append", async (_event, item: AgentChatHistoryItem) => agentChatHistoryService.append(item));
 ipcMain.handle("agent:history:clear", async () => agentChatHistoryService.clear());
 ipcMain.handle("system:fonts", async () => Array.from(new Set(await getFonts({ disableQuoting: true }))).sort((a, b) => a.localeCompare(b)));
+ipcMain.handle("network-proxy:load", async () => loadNetworkProxySettings());
+ipcMain.handle("network-proxy:save", async (_event, settings: NetworkProxySettings) => saveNetworkProxySettings(settings));
 ipcMain.handle("prompts:load", async (_event, scope: PromptScope) => projectService.loadPrompts(scope));
 ipcMain.handle("prompts:save", async (_event, scope: PromptScope, prompts: PromptConfig) => projectService.savePrompts(scope, prompts));
 ipcMain.handle("prompts:defaults", async () => projectService.loadDefaultPrompts());

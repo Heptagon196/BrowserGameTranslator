@@ -103,6 +103,17 @@ export interface UpdateDownloadProgress {
   percent: number;
 }
 
+export type NetworkProxyProtocol = "http" | "socks5";
+
+export interface NetworkProxySettings {
+  schemaVersion: 1;
+  enabled: boolean;
+  protocol: NetworkProxyProtocol;
+  host: string;
+  port: number;
+  bypassList: string;
+}
+
 export interface PackageProjectInput {
   fileName: string;
   format: PackageFormat;

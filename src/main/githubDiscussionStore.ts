@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
-import { app, net } from "electron";
+import { app } from "electron";
 import { JSDOM } from "jsdom";
+import { networkFetch } from "./networkProxyService";
 import { readJson, writeJson } from "./storage";
 
 export interface GitHubDiscussionSource {
@@ -495,9 +496,9 @@ export async function fetchText(url: string): Promise<string> {
   return response.text();
 }
 
-export async function fetchGitHub(url: string, init?: Parameters<typeof net.fetch>[1]): Promise<Response> {
+export async function fetchGitHub(url: string, init?: RequestInit): Promise<Response> {
   try {
-    return await net.fetch(url, {
+    return await networkFetch(url, {
       ...init,
       headers: {
         "User-Agent": "BrowserGameTranslator",
@@ -506,7 +507,7 @@ export async function fetchGitHub(url: string, init?: Parameters<typeof net.fetc
     });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`连接 GitHub 失败：${reason}。请检查网络、代理设置，或在设置里配置 GitHub API Token 后重试。`);
+    throw new Error(`连接 GitHub 失败：${reason}。请检查网络、代理设置，或在设置里配置 GitHub API Token 后重试。`, { cause: error });
   }
 }
 
