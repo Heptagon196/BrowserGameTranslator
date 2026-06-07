@@ -383,7 +383,48 @@ function scanTextForAssetRefs(text: string, baseUrl: string, source: WebAssetSou
     const assetUrl = normalizeResourceUrl(candidate, baseUrl);
     if (assetUrl) refs.push({ url: assetUrl, required: false, source });
   }
+  refs.push(...scanTemplateAssetFunctionRefs(text, baseUrl, source));
   return refs;
+}
+
+function scanTemplateAssetFunctionRefs(text: string, baseUrl: string, source: WebAssetSource): WebAssetRef[] {
+  const refs: WebAssetRef[] = [];
+  const builders = new Map<string, { parameter: string; template: string }>();
+  for (const match of text.matchAll(/\b(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*=>\s*`([^`]*\$\{[A-Za-z_$][\w$]*\}[^`]*)`/g)) {
+    const [, name, parameter, template] = match;
+    if (!template.includes(`\${${parameter}}`)) continue;
+    builders.set(name, { parameter, template });
+  }
+  for (const [name, builder] of builders) {
+    const callPattern = new RegExp(`\\b${escapeRegExp(name)}\\(\\s*([\"'])((?:\\\\.|(?!\\1).)*)\\1\\s*\\)`, "g");
+    for (const call of text.matchAll(callPattern)) {
+      const argument = unescapeSimpleJsString(call[2]);
+      const candidate = builder.template.replaceAll(`\${${builder.parameter}}`, argument);
+      if (hasTemplatePlaceholder(candidate)) continue;
+      if (!assetExtensions.test(candidate.split(/[?#]/, 1)[0])) continue;
+      const assetUrl = normalizeResourceUrl(candidate, baseUrl);
+      if (assetUrl) refs.push({ url: assetUrl, required: false, source });
+    }
+  }
+  return refs;
+}
+
+function unescapeSimpleJsString(value: string): string {
+  return value.replace(/\\(['"\\bfnrtv])/g, (_match, escaped: string) => {
+    switch (escaped) {
+      case "b": return "\b";
+      case "f": return "\f";
+      case "n": return "\n";
+      case "r": return "\r";
+      case "t": return "\t";
+      case "v": return "\v";
+      default: return escaped;
+    }
+  });
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function hasTemplatePlaceholder(value: string): boolean {

@@ -6,6 +6,8 @@ import { PackageFormat, PackageProjectInput, PackageProjectResult, ProjectConfig
 import { projectDirs } from "./storage";
 
 const formats = new Set<PackageFormat>(["zip", "7z", "tar.xz"]);
+const archiveExcludeArgs = ["-xr!.bgt", "-xr!.git", "-xr!node_modules", "-xr!web-game-download-index.json"];
+const packageExcludedNames = new Set([".bgt", ".git", "node_modules", "web-game-download-index.json"]);
 
 export async function packageProject(project: ProjectConfig, input: PackageProjectInput): Promise<PackageProjectResult> {
   const format = formats.has(input.format) ? input.format : "zip";
@@ -29,11 +31,11 @@ export async function packageProject(project: ProjectConfig, input: PackageProje
     if (format === "tar.xz") {
       const tempTarPath = path.join(tempRoot, `${fileName}.tar`);
       await fs.rm(tempTarPath, { force: true });
-      await run7zip(binaryPath, ["a", "-ttar", tempTarPath, "*", "-xr!.bgt", "-xr!.git", "-xr!node_modules"], archiveSourceRoot);
+      await run7zip(binaryPath, ["a", "-ttar", tempTarPath, "*", ...archiveExcludeArgs], archiveSourceRoot);
       await run7zip(binaryPath, ["a", "-txz", tempArchivePath, tempTarPath], tempRoot);
       await fs.rm(tempTarPath, { force: true });
     } else {
-      await run7zip(binaryPath, ["a", `-t${format}`, tempArchivePath, "*", "-xr!.bgt", "-xr!.git", "-xr!node_modules"], archiveSourceRoot);
+      await run7zip(binaryPath, ["a", `-t${format}`, tempArchivePath, "*", ...archiveExcludeArgs], archiveSourceRoot);
     }
     await moveFile(tempArchivePath, archivePath);
   } finally {
@@ -86,20 +88,22 @@ function run7zip(binaryPath: string, args: string[], cwd: string): Promise<void>
 async function createLauncherStaging(project: ProjectConfig, fileName: string): Promise<string> {
   const dirs = projectDirs(project);
   const stagingRoot = path.join(dirs.bgtRoot, "package-staging", fileName);
+  const webRoot = path.join(stagingRoot, "www");
   const launcherPath = await resolveLauncherExecutable();
   await fs.rm(stagingRoot, { recursive: true, force: true });
-  await copyDirectory(dirs.projectRoot, stagingRoot);
+  await copyDirectory(dirs.projectRoot, webRoot);
   const launcherFileName = await chooseLauncherFileName(stagingRoot, project.projectName);
   await fs.copyFile(launcherPath, path.join(stagingRoot, launcherFileName));
   await fs.writeFile(
     path.join(stagingRoot, "BGT-Launcher.json"),
-    `${JSON.stringify({ homePage: project.homePage || "index.html" }, null, 2)}\n`,
+    `${JSON.stringify({ rootDirectory: "www", homePage: project.homePage || "index.html" }, null, 2)}\n`,
     "utf8"
   );
   await fs.writeFile(
     path.join(stagingRoot, "README-启动说明.txt"),
     [
       `双击 ${launcherFileName} 启动游戏。`,
+      "www 文件夹内是游戏项目文件，请保持它和启动器在同一目录。",
       "启动器会开启本地网页服务器，并用默认浏览器打开游戏首页。",
       "游玩时保持启动器窗口开启。",
       "按 Enter 或关闭窗口停止网页服务。"
@@ -126,7 +130,7 @@ async function copyDirectory(source: string, destination: string): Promise<void>
   await fs.mkdir(destination, { recursive: true });
   const entries = await fs.readdir(source, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.name === ".bgt" || entry.name === ".git" || entry.name === "node_modules") continue;
+    if (packageExcludedNames.has(entry.name)) continue;
     const sourcePath = path.join(source, entry.name);
     const destinationPath = path.join(destination, entry.name);
     if (entry.isDirectory()) {

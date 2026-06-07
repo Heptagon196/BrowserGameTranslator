@@ -21,6 +21,7 @@
 
 typedef struct LauncherConfig {
   char homePage[MAX_HOME_PAGE];
+  char rootDirectory[MAX_HOME_PAGE];
   unsigned short port;
   int hasPort;
 } LauncherConfig;
@@ -37,6 +38,7 @@ static void fail_and_wait(const char *message);
 static int read_launcher_config(const char *root, LauncherConfig *config);
 static int write_launcher_config(const char *root, const LauncherConfig *config);
 static void normalize_home_page(char *value);
+static void normalize_root_directory(char *value);
 static SOCKET create_listening_server(unsigned short configuredPort, int hasConfiguredPort, unsigned short *actualPort, char *errorMessage, size_t errorMessageSize);
 static int bind_and_listen(SOCKET server, unsigned short port, unsigned short *actualPort);
 static unsigned short random_preview_port(void);
@@ -63,7 +65,8 @@ int main(void) {
   WSADATA wsa;
   SOCKET server;
   char exePath[MAX_PATH];
-  char root[MAX_PATH];
+  char launcherRoot[MAX_PATH];
+  char contentRoot[MAX_PATH];
   char homePath[MAX_PATH];
   char url[MAX_URL];
   char bindError[1024];
@@ -77,12 +80,21 @@ int main(void) {
     fail_and_wait("无法定位启动器程序。");
     return 1;
   }
-  strncpy(root, exePath, sizeof(root) - 1);
-  root[sizeof(root) - 1] = '\0';
-  dirname_in_place(root);
+  strncpy(launcherRoot, exePath, sizeof(launcherRoot) - 1);
+  launcherRoot[sizeof(launcherRoot) - 1] = '\0';
+  dirname_in_place(launcherRoot);
 
-  read_launcher_config(root, &config);
-  if (!build_safe_path(root, config.homePage, homePath, sizeof(homePath))) {
+  read_launcher_config(launcherRoot, &config);
+  if (!build_safe_path(launcherRoot, config.rootDirectory, contentRoot, sizeof(contentRoot))) {
+    fail_and_wait("根目录不能指向启动器目录外。");
+    return 1;
+  }
+  DWORD contentAttributes = GetFileAttributesA(contentRoot);
+  if (contentAttributes == INVALID_FILE_ATTRIBUTES || !(contentAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+    fail_and_wait("没有找到配置的根目录。");
+    return 1;
+  }
+  if (!build_safe_path(contentRoot, config.homePage, homePath, sizeof(homePath))) {
     fail_and_wait("首页路径不能指向游戏目录外。");
     return 1;
   }
@@ -107,7 +119,7 @@ int main(void) {
   if (!config.hasPort) {
     config.port = actualPort;
     config.hasPort = 1;
-    if (!write_launcher_config(root, &config)) {
+    if (!write_launcher_config(launcherRoot, &config)) {
       printf("警告：无法写入 BGT-Launcher.json，端口下次可能重新分配。\n");
     }
   }
@@ -116,7 +128,8 @@ int main(void) {
   backslash_to_slash(url);
 
   printf("本地服务器已启动。\n");
-  printf("游戏目录：%s\n", root);
+  printf("启动器目录：%s\n", launcherRoot);
+  printf("游戏目录：%s\n", contentRoot);
   printf("正在打开：%s\n", url);
   open_browser(url);
   printf("游玩时保持此窗口开启。按 Enter 停止网页服务。\n");
@@ -144,13 +157,13 @@ int main(void) {
       continue;
     }
     context->socket = client;
-    strncpy(context->root, root, sizeof(context->root) - 1);
+    strncpy(context->root, contentRoot, sizeof(context->root) - 1);
     strncpy(context->homePage, config.homePage, sizeof(context->homePage) - 1);
     HANDLE thread = (HANDLE)_beginthreadex(NULL, 0, client_thread, context, 0, NULL);
     if (thread) {
       CloseHandle(thread);
     } else {
-      handle_client(client, root, config.homePage);
+      handle_client(client, contentRoot, config.homePage);
       free(context);
     }
   }
@@ -317,6 +330,10 @@ static int read_launcher_config(const char *root, LauncherConfig *config) {
   char *quote;
   char *end;
   size_t length;
+  char *rootKey;
+  char *rootColon;
+  char *rootQuote;
+  char *rootEnd;
   char *portKey;
   char *portColon;
   char *portStart;
@@ -324,6 +341,7 @@ static int read_launcher_config(const char *root, LauncherConfig *config) {
 
   memset(config, 0, sizeof(*config));
   strcpy(config->homePage, "index.html");
+  strcpy(config->rootDirectory, "www");
 
   snprintf(configPath, sizeof(configPath), "%s\\BGT-Launcher.json", root);
   file = CreateFileA(configPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -356,6 +374,21 @@ static int read_launcher_config(const char *root, LauncherConfig *config) {
     }
   }
 
+  rootKey = strstr(data, "\"rootDirectory\"");
+  if (rootKey) {
+    rootColon = strchr(rootKey, ':');
+    rootQuote = rootColon ? strchr(rootColon, '"') : NULL;
+    rootEnd = rootQuote ? rootQuote + 1 : NULL;
+    if (rootEnd) {
+      while (*rootEnd && *rootEnd != '"') rootEnd++;
+      length = (size_t)(rootEnd - rootQuote - 1);
+      if (length >= sizeof(config->rootDirectory)) length = sizeof(config->rootDirectory) - 1;
+      memcpy(config->rootDirectory, rootQuote + 1, length);
+      config->rootDirectory[length] = '\0';
+      normalize_root_directory(config->rootDirectory);
+    }
+  }
+
   portKey = strstr(data, "\"port\"");
   portColon = portKey ? strchr(portKey, ':') : NULL;
   portStart = portColon ? portColon + 1 : NULL;
@@ -375,6 +408,7 @@ static int read_launcher_config(const char *root, LauncherConfig *config) {
 static int write_launcher_config(const char *root, const LauncherConfig *config) {
   char configPath[MAX_PATH];
   char homePage[MAX_HOME_PAGE];
+  char rootDirectory[MAX_HOME_PAGE];
   char data[1024];
   HANDLE file;
   DWORD written;
@@ -382,8 +416,11 @@ static int write_launcher_config(const char *root, const LauncherConfig *config)
   strncpy(homePage, config->homePage, sizeof(homePage) - 1);
   homePage[sizeof(homePage) - 1] = '\0';
   backslash_to_slash(homePage);
+  strncpy(rootDirectory, config->rootDirectory, sizeof(rootDirectory) - 1);
+  rootDirectory[sizeof(rootDirectory) - 1] = '\0';
+  backslash_to_slash(rootDirectory);
   snprintf(configPath, sizeof(configPath), "%s\\BGT-Launcher.json", root);
-  snprintf(data, sizeof(data), "{\r\n  \"homePage\": \"%s\",\r\n  \"port\": %u\r\n}\r\n", homePage, config->port);
+  snprintf(data, sizeof(data), "{\r\n  \"rootDirectory\": \"%s\",\r\n  \"homePage\": \"%s\",\r\n  \"port\": %u\r\n}\r\n", rootDirectory, homePage, config->port);
 
   file = CreateFileA(configPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
   if (file == INVALID_HANDLE_VALUE) return 0;
@@ -408,6 +445,25 @@ static void normalize_home_page(char *value) {
     end--;
   }
   if (value[0] == '\0') strcpy(value, "index.html");
+}
+
+static void normalize_root_directory(char *value) {
+  char *start = value;
+  char *end;
+  while (isspace((unsigned char)*start)) start++;
+  if (start != value) memmove(value, start, strlen(start) + 1);
+  slash_to_backslash(value);
+  while (value[0] == '\\' || value[0] == '/') memmove(value, value + 1, strlen(value));
+  end = value + strlen(value);
+  while (end > value && isspace((unsigned char)end[-1])) {
+    end[-1] = '\0';
+    end--;
+  }
+  while (end > value && (end[-1] == '\\' || end[-1] == '/')) {
+    end[-1] = '\0';
+    end--;
+  }
+  if (value[0] == '\0') strcpy(value, "www");
 }
 
 static SOCKET create_listening_server(unsigned short configuredPort, int hasConfiguredPort, unsigned short *actualPort, char *errorMessage, size_t errorMessageSize) {
