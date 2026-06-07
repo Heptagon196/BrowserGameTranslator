@@ -9,6 +9,7 @@ export default function ToolsView({ run }: { run: <T>(message: string, task: () 
   const [webModalOpen, setWebModalOpen] = useState(false);
   const [url, setUrl] = useState("");
   const [outputDirectory, setOutputDirectory] = useState("");
+  const [entryPath, setEntryPath] = useState("index.html");
   const [outputErrors, setOutputErrors] = useState<string[]>(["请选择保存目录。"]);
   const [result, setResult] = useState<WebGameDownloadResult | null>(null);
   const [webLogs, setWebLogs] = useState<WebGameDownloadEvent[]>([]);
@@ -70,7 +71,7 @@ export default function ToolsView({ run }: { run: <T>(message: string, task: () 
     setResult(null);
     setWebLogs([]);
     setWebProgress(null);
-    void run("下载网页游戏", () => window.bgt.downloadWebGame({ url, outputDirectory }), setResult);
+    void run("下载网页游戏", () => window.bgt.downloadWebGame({ url, outputDirectory, entryPath }), setResult);
   };
 
   const startAaDownload = () => {
@@ -113,6 +114,9 @@ export default function ToolsView({ run }: { run: <T>(message: string, task: () 
           <FieldRow label="保存目录" description="选择一个已经存在且为空的文件夹。下载器会直接在此目录下保存网页资源和下载索引。">
             <PathInput value={outputDirectory} onPick={chooseOutput} onChange={setOutputDirectory} />
           </FieldRow>
+          <FieldRow label="主页" description="入口页面保存到项目内的相对路径。默认 index.html；可填写 intro、intro.html 或 pages/start.html。">
+            <input value={entryPath} onChange={(event) => setEntryPath(event.target.value)} placeholder="index.html" />
+          </FieldRow>
           {outputErrors.length > 0 && (
             <div className="error-list">
               {outputErrors.map((error) => (
@@ -121,7 +125,7 @@ export default function ToolsView({ run }: { run: <T>(message: string, task: () 
             </div>
           )}
           <div className="button-row">
-            <button disabled={!url.trim() || outputErrors.length > 0} onClick={startDownload}>
+            <button disabled={!url.trim() || !entryPath.trim() || outputErrors.length > 0} onClick={startDownload}>
               <Download size={16} />
               下载网页游戏
             </button>

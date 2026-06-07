@@ -66,6 +66,7 @@ import {
   TextItem,
   UpdateCheckResult,
   UpdateDownloadProgress,
+  WebGameAdditionalPageInput,
   WebGameDownloadEvent,
   WebGameDownloadInput,
   WebGameDownloadProgress,
@@ -123,6 +124,7 @@ const api = {
   loadDefaultPrompts: (): Promise<PromptConfig> => ipcRenderer.invoke("prompts:defaults"),
   loadEffectivePrompts: (): Promise<PromptConfig> => ipcRenderer.invoke("prompts:effective"),
   downloadWebGame: (input: WebGameDownloadInput): Promise<WebGameDownloadResult> => ipcRenderer.invoke("tools:webGame:download", input),
+  downloadAdditionalWebPage: (input: WebGameAdditionalPageInput): Promise<WebGameDownloadResult> => ipcRenderer.invoke("tools:webGame:downloadAdditionalPage", input),
   validateWebGameOutputDirectory: (outputPath: string): Promise<string[]> => ipcRenderer.invoke("tools:webGame:validateOutput", outputPath),
   onWebGameDownloadLog: (listener: (event: WebGameDownloadEvent) => void): (() => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, logEvent: WebGameDownloadEvent) => listener(logEvent);

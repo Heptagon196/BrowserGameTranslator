@@ -836,6 +836,7 @@ function ProjectView({
   const [downloadModalOpen, setDownloadModalOpen] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState("");
   const [downloadOutputDirectory, setDownloadOutputDirectory] = useState("");
+  const [downloadEntryPath, setDownloadEntryPath] = useState("index.html");
   const [webOutputErrors, setWebOutputErrors] = useState<string[]>([]);
   const [webRuntimeCaptureSeconds, setWebRuntimeCaptureSeconds] = useState(9);
   const [webDownloadLogs, setWebDownloadLogs] = useState<WebGameDownloadEvent[]>([]);
@@ -844,6 +845,10 @@ function ProjectView({
   const [downloadResultWarning, setDownloadResultWarning] = useState("");
   const [failedDownloadDetails, setFailedDownloadDetails] = useState<FailedDownloadCreateConfirmation | null>(null);
   const [failedDownloadConfirmationOpen, setFailedDownloadConfirmationOpen] = useState(false);
+  const [additionalPageModalOpen, setAdditionalPageModalOpen] = useState(false);
+  const [additionalPageUrl, setAdditionalPageUrl] = useState("");
+  const [additionalPageRuntimeCaptureSeconds, setAdditionalPageRuntimeCaptureSeconds] = useState(9);
+  const [additionalPageResult, setAdditionalPageResult] = useState<WebGameDownloadResult | null>(null);
   const [aaDownloadLogs, setAaDownloadLogs] = useState<AaOfflineDownloadEvent[]>([]);
   const [aaOutputErrors, setAaOutputErrors] = useState<string[]>([]);
   const [aaPlayerVersion, setAaPlayerVersion] = useState("master");
@@ -946,6 +951,13 @@ function ProjectView({
     setDownloadModalOpen(true);
   };
 
+  const openAdditionalPageDialog = () => {
+    setWebDownloadLogs([]);
+    setWebDownloadProgress(null);
+    setAdditionalPageResult(null);
+    setAdditionalPageModalOpen(true);
+  };
+
   const continueToCreateProject = (projectRoot: string) => {
     setFailedDownloadDetails(null);
     setFailedDownloadConfirmationOpen(false);
@@ -993,6 +1005,7 @@ function ProjectView({
         const result: WebGameDownloadResult = await window.bgt.downloadWebGame({
           url: downloadUrl,
           outputDirectory: downloadOutputDirectory,
+          entryPath: downloadEntryPath,
           runtimeCaptureSeconds: webRuntimeCaptureSeconds
         });
         if (!result.filePath) throw new Error("下载完成但没有返回入口文件。");
@@ -1018,13 +1031,39 @@ function ProjectView({
     );
   };
 
+  const startAdditionalPageDownload = () => {
+    const url = additionalPageUrl.trim();
+    if (!url) return;
+    setWebDownloadLogs([]);
+    setWebDownloadProgress(null);
+    setAdditionalPageResult(null);
+    void run(
+      "额外下载页面",
+      async () => {
+        const result = await window.bgt.downloadAdditionalWebPage({
+          url,
+          runtimeCaptureSeconds: additionalPageRuntimeCaptureSeconds
+        });
+        const nextSnapshot = await window.bgt.refreshProject();
+        return { result, nextSnapshot };
+      },
+      ({ result, nextSnapshot }) => {
+        setAdditionalPageResult(result);
+        mergeSnapshot(nextSnapshot);
+        showToast(result.failures?.length ? "额外页面下载完成，但存在失败资源" : "额外页面已合并到项目源文件", result.failures?.length ? "error" : "success");
+      }
+    );
+  };
+
   const downloadDisabled =
     busy ||
     !matchedDownloadProvider ||
     !downloadOutputDirectory.trim() ||
+    (matchedDownloadProvider.id === "web" && !downloadEntryPath.trim()) ||
     (matchedDownloadProvider.id === "aaonline" && aaOutputErrors.length > 0) ||
     (matchedDownloadProvider.id === "web" && webOutputErrors.length > 0);
   const activeDownloadLogs = matchedDownloadProvider?.id === "aaonline" ? aaDownloadLogs : webDownloadLogs;
+  const additionalPageDisabled = busy || !snapshot.project || !additionalPageUrl.trim();
 
   return (
     <div className="stack">
@@ -1039,6 +1078,13 @@ function ProjectView({
           <span>下载游戏并创建项目</span>
           <small>输入下载网址，自动匹配下载器；下载完成后进入创建项目流程</small>
         </button>
+        {snapshot.project && (
+          <button className="project-action single-project-action" disabled={busy} onClick={openAdditionalPageDialog}>
+            <Download size={28} />
+            <span>额外下载页面</span>
+            <small>输入当前游戏的额外页面地址，用通用下载器下载资源并合并到项目源文件</small>
+          </button>
+        )}
       </div>
       {snapshot.project && <MetricGrid snapshot={snapshot} />}
       <div className="panel">
@@ -1136,6 +1182,11 @@ function ProjectView({
           <FieldRow label={matchedDownloadProvider?.outputLabel ?? "保存目录"} description={matchedDownloadProvider?.outputDescription ?? "选择下载输出目录。"}>
             <PathInput value={downloadOutputDirectory} onPick={chooseDownloadOutputDirectory} onChange={setDownloadOutputDirectory} />
           </FieldRow>
+          {matchedDownloadProvider?.id === "web" && (
+            <FieldRow label="主页" description="入口页面保存到项目内的相对路径。默认 index.html；可填写 intro、intro.html 或 pages/start.html。">
+              <input value={downloadEntryPath} onChange={(event) => setDownloadEntryPath(event.target.value)} placeholder="index.html" />
+            </FieldRow>
+          )}
           {matchedDownloadProvider?.id === "web" && (
             <RadixCollapsible.Root className="collapsible-panel">
               <RadixCollapsible.Trigger className="collapsible-trigger">高级选项</RadixCollapsible.Trigger>
@@ -1240,6 +1291,66 @@ function ProjectView({
                   查看失败资源
                 </button>
               </div>
+            )}
+          </div>
+        )}
+      </AppDialog>
+      <AppDialog
+        open={additionalPageModalOpen}
+        title="额外下载页面"
+        description="输入当前游戏的额外页面网址后，程序会按项目已有下载根路径计算本地相对路径，并把下载结果合并到 .bgt/original。"
+        onOpenChange={setAdditionalPageModalOpen}
+      >
+        <div className="settings-form">
+          <FieldRow label="页面网址" description="填写同一个网页游戏的其他页面地址，例如章节页、结局页或隐藏入口。">
+            <input value={additionalPageUrl} onChange={(event) => setAdditionalPageUrl(event.target.value)} placeholder="https://example.com/game/extra" />
+          </FieldRow>
+          <RadixCollapsible.Root className="collapsible-panel">
+            <RadixCollapsible.Trigger className="collapsible-trigger">高级选项</RadixCollapsible.Trigger>
+            <RadixCollapsible.Content>
+              <div className="settings-form nested-settings">
+                <FieldRow label="运行时捕获秒数" description="下载静态资源后，打开页面并监听启动阶段的网络请求。设为 0 可关闭运行时捕获。">
+                  <input
+                    min={0}
+                    max={60}
+                    type="number"
+                    value={additionalPageRuntimeCaptureSeconds}
+                    onChange={(event) => setAdditionalPageRuntimeCaptureSeconds(Math.max(0, Math.min(60, Number(event.target.value) || 0)))}
+                  />
+                </FieldRow>
+              </div>
+            </RadixCollapsible.Content>
+          </RadixCollapsible.Root>
+          <div className="button-row">
+            <button disabled={additionalPageDisabled} onClick={startAdditionalPageDownload}>
+              <Download size={16} />
+              下载并合并
+            </button>
+          </div>
+        </div>
+        {(webDownloadProgress || webDownloadLogs.length > 0 || additionalPageResult) && (
+          <div className="tool-result">
+            <h2>下载状态</h2>
+            {webDownloadProgress && (
+              <p>
+                {webDownloadProgress.message ?? "下载中"}：{webDownloadProgress.completed}/{webDownloadProgress.total}
+              </p>
+            )}
+            {additionalPageResult && (
+              <div className={additionalPageResult.failures?.length ? "download-warning-panel" : "success-panel"}>
+                <div>
+                  <strong>{additionalPageResult.message}</strong>
+                  {additionalPageResult.filePath && <span>入口文件：{additionalPageResult.filePath}</span>}
+                </div>
+              </div>
+            )}
+            {webDownloadLogs.length > 0 && (
+              <pre className="tool-log">
+                {webDownloadLogs
+                  .map((entry) => `[${entry.stream}] ${entry.text.trimEnd()}`)
+                  .filter(Boolean)
+                  .join("\n")}
+              </pre>
             )}
           </div>
         )}

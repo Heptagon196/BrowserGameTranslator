@@ -18,7 +18,7 @@ import { exportTextItems, importTextItems } from "./importExport";
 import { analyzeLocally } from "./localAnalysis";
 import { buildOnlineDictionaryInlineSubmission, deleteOnlineDictionaryTable, exportOnlineDictionarySubmissionPackage, getOnlineDictionaryTokenStatus, importOnlineDictionaryTable as importRemoteDictionaryTable, listOnlineDictionarySources, listOnlineDictionaryTables, loadOnlineDictionaryTable, loadOnlineDictionaryTableByUrl, publishOnlineDictionaryTable, saveOnlineDictionarySources, saveOnlineDictionaryToken, testOnlineDictionarySource, updateOnlineDictionaryTable } from "./onlineDictionaryService";
 import { buildOnlineExtractionRuleInlineSubmission, deleteOnlineExtractionRulePackage, getOnlineExtractionRuleTokenStatus, importOnlineExtractionRulePackage, listOnlineExtractionRulePackages, listOnlineExtractionRuleSources, loadOnlineExtractionRulePackage, publishOnlineExtractionRulePackage, saveOnlineExtractionRuleSources, saveOnlineExtractionRuleToken, testOnlineExtractionRuleSource, updateOnlineExtractionRulePackage } from "./onlineExtractionRuleService";
-import { downloadWebGame, validateWebGameOutputDirectory } from "./webGameDownloadService";
+import { downloadAdditionalWebPage, downloadWebGame, validateWebGameOutputDirectory } from "./webGameDownloadService";
 import { applyPatch, previewPatch, restoreWorkingCopy } from "./patchService";
 import { openProjectDirectory as openProjectDirectoryInShell, packageProject } from "./packageService";
 import { getProjectPreviewStatus, previewProjectGame, stopProjectGamePreview } from "./previewService";
@@ -52,6 +52,7 @@ import {
   ExtractionRuleScope,
   NetworkProxySettings,
   TextItem,
+  WebGameAdditionalPageInput,
   WebGameDownloadInput
 } from "../shared/types";
 
@@ -251,6 +252,17 @@ ipcMain.handle("prompts:defaults", async () => projectService.loadDefaultPrompts
 ipcMain.handle("tools:webGame:download", async (event, input: WebGameDownloadInput) => {
   const sender = event.sender;
   return downloadWebGame(input, {
+    onEvent: (logEvent) => {
+      if (!sender.isDestroyed()) sender.send("tools:webGame:log", logEvent);
+    },
+    onProgress: (progress) => {
+      if (!sender.isDestroyed()) sender.send("tools:webGame:progress", progress);
+    }
+  });
+});
+ipcMain.handle("tools:webGame:downloadAdditionalPage", async (event, input: WebGameAdditionalPageInput) => {
+  const sender = event.sender;
+  return downloadAdditionalWebPage(projectService.project, input, {
     onEvent: (logEvent) => {
       if (!sender.isDestroyed()) sender.send("tools:webGame:log", logEvent);
     },

@@ -866,6 +866,26 @@ label {
   font-size: 13px;
 }
 
+.success-panel {
+  background: #eef8f4;
+  border: 1px solid #9ecfbc;
+  border-radius: 6px;
+  color: #14543f;
+  margin-top: 12px;
+  padding: 10px 12px;
+}
+
+.success-panel > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.success-panel span {
+  color: #376b5a;
+  font-size: 13px;
+}
+
 .download-failure-dialog {
   max-width: 680px;
 }

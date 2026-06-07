@@ -44,14 +44,44 @@ export async function previewProjectGame(project: ProjectConfig): Promise<string
         response.end("Forbidden");
         return;
       }
-      const stat = await fs.stat(filePath);
-      if (stat.isDirectory()) {
-        response.writeHead(302, { Location: `${requestUrl.pathname.replace(/\/?$/, "/")}index.html` });
-        response.end();
+      let stat = await statOrUndefined(filePath);
+      let resolvedFilePath = filePath;
+      if (!stat) {
+        const htmlFallback = await htmlFallbackPath(root, relativePath);
+        if (htmlFallback) {
+          resolvedFilePath = htmlFallback.filePath;
+          stat = htmlFallback.stat;
+        }
+      }
+      if (!stat) {
+        response.writeHead(404);
+        response.end("Not found");
         return;
       }
-      response.writeHead(200, { "Content-Type": contentTypeFor(filePath) });
-      response.end(await fs.readFile(filePath));
+      if (stat.isDirectory()) {
+        const directoryIndexPath = path.join(filePath, "index.html");
+        const directoryIndexStat = await statOrUndefined(directoryIndexPath);
+        if (directoryIndexStat?.isFile()) {
+          response.writeHead(302, { Location: `${requestUrl.pathname.replace(/\/?$/, "/")}index.html` });
+          response.end();
+          return;
+        }
+        const htmlFallback = await htmlFallbackPath(root, relativePath);
+        if (!htmlFallback) {
+          response.writeHead(404);
+          response.end("Not found");
+          return;
+        }
+        resolvedFilePath = htmlFallback.filePath;
+        stat = htmlFallback.stat;
+      }
+      if (!stat.isFile()) {
+        response.writeHead(404);
+        response.end("Not found");
+        return;
+      }
+      response.writeHead(200, { "Content-Type": contentTypeFor(resolvedFilePath) });
+      response.end(await fs.readFile(resolvedFilePath));
     } catch {
       response.writeHead(404);
       response.end("Not found");
@@ -117,6 +147,22 @@ function normalizeHomePage(value: string | undefined): string {
 
 function urlPathFor(value: string): string {
   return `/${value.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+async function htmlFallbackPath(root: string, relativePath: string): Promise<{ filePath: string; stat: Awaited<ReturnType<typeof fs.stat>> } | undefined> {
+  if (!relativePath || relativePath.endsWith("/") || path.extname(relativePath)) return undefined;
+  const filePath = path.resolve(root, `${relativePath}.html`);
+  if (!isPathInsideOrSame(filePath, root)) return undefined;
+  const stat = await statOrUndefined(filePath);
+  return stat?.isFile() ? { filePath, stat } : undefined;
+}
+
+async function statOrUndefined(filePath: string): Promise<Awaited<ReturnType<typeof fs.stat>> | undefined> {
+  try {
+    return await fs.stat(filePath);
+  } catch {
+    return undefined;
+  }
 }
 
 function isPathInsideOrSame(child: string, parent: string): boolean {

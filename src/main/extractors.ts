@@ -768,7 +768,7 @@ function extractJsStrings(text: string, offset: number, onProgress?: (current: n
       const propertyKey = propertyKeyBeforeString(text, parsedTemplate.start);
       if (isTechnicalJsValueKey(propertyKey)) continue;
       const keyName = keyNameForJsValue(stack, propertyKey);
-      const keyPath = keyPathForJsValue(stack, propertyKey);
+      const keyPath = specializeAnonymousJsArrayPath(text, parsedTemplate.start, keyPathForJsValue(stack, propertyKey));
       if (keyName && isTechnicalJsValueKey(keyName)) continue;
       if (parsedTemplate.parts.length === 1) {
         const rawValue = unescapeJs(parsedTemplate.parts[0].raw, "`");
@@ -821,7 +821,7 @@ function extractJsStrings(text: string, offset: number, onProgress?: (current: n
     const unreliableObjectKey = isValueOfUnreliableQuotedObjectKey(text, parsed.start);
     if (unreliableObjectKey && shouldSkipValueAfterUnreliableObjectKey(value)) continue;
     const keyName = keyNameForJsValue(stack, propertyKey);
-    const keyPath = keyPathForJsValue(stack, propertyKey);
+    const keyPath = specializeAnonymousJsArrayPath(text, parsed.start, keyPathForJsValue(stack, propertyKey));
     if (keyName && isTechnicalJsValueKey(keyName)) continue;
     const prefixedValue = normalizePrefixedValueString(value);
     if (prefixedValue !== null) {
@@ -1278,6 +1278,46 @@ function keyPathForJsValue(stack: JsStructureFrame[], fallback: string): string 
     ? [...frame.path, frame.pendingKey || fallback].filter(Boolean)
     : frame.path;
   return segments.length ? formatJsPath(segments) : fallback || undefined;
+}
+
+function specializeAnonymousJsArrayPath(text: string, stringStart: number, keyPath?: string): string | undefined {
+  if (!keyPath || !/^(?:\[\*\])+$/.test(keyPath)) return keyPath;
+  const arrayStart = nearestArrayStartBefore(text, stringStart);
+  if (arrayStart < 0) return keyPath;
+  const callName = callNameBeforeArrayArgument(text, arrayStart);
+  if (callName) return `call.${callName}${keyPath}`;
+  return keyPath;
+}
+
+function nearestArrayStartBefore(text: string, start: number): number {
+  let depth = 0;
+  const lowerBound = Math.max(0, start - 2000);
+  for (let index = start - 1; index >= lowerBound; index -= 1) {
+    const char = text[index];
+    if (char === "]") {
+      depth += 1;
+      continue;
+    }
+    if (char === "[") {
+      if (depth === 0) return index;
+      depth -= 1;
+      continue;
+    }
+    if (depth === 0 && char === ";") return -1;
+  }
+  return -1;
+}
+
+function callNameBeforeArrayArgument(text: string, arrayStart: number): string {
+  let index = arrayStart - 1;
+  while (index >= 0 && /\s/.test(text[index])) index -= 1;
+  if (text[index] !== "(") return "";
+  index -= 1;
+  while (index >= 0 && /\s/.test(text[index])) index -= 1;
+  const end = index + 1;
+  while (index >= 0 && /[A-Za-z0-9_$.\]]/.test(text[index])) index -= 1;
+  const candidate = text.slice(index + 1, end).replace(/\[[^\]]*\]$/g, "");
+  return /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$/.test(candidate) ? candidate : "";
 }
 
 function clearConsumedObjectKey(stack: JsStructureFrame[]): void {

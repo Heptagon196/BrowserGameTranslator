@@ -42,6 +42,8 @@ static int bind_and_listen(SOCKET server, unsigned short port, unsigned short *a
 static unsigned short random_preview_port(void);
 static void describe_port_owner(unsigned short port, char *out, size_t outSize);
 static int build_safe_path(const char *root, const char *relative, char *outPath, size_t outPathSize);
+static int try_html_fallback_path(const char *root, const char *requestPath, char *outPath, size_t outPathSize);
+static int request_path_has_extension(const char *path);
 static unsigned __stdcall input_thread(void *arg);
 static unsigned __stdcall client_thread(void *arg);
 static void handle_client(SOCKET client, const char *root, const char *homePage);
@@ -211,18 +213,23 @@ static void handle_client(SOCKET client, const char *root, const char *homePage)
 
   DWORD attributes = GetFileAttributesA(filePath);
   if (attributes == INVALID_FILE_ATTRIBUTES) {
-    send_response(client, 404, "Not Found", "text/plain; charset=utf-8", "Not found");
-    closesocket(client);
-    return;
+    if (!try_html_fallback_path(root, requestPath, filePath, sizeof(filePath))) {
+      send_response(client, 404, "Not Found", "text/plain; charset=utf-8", "Not found");
+      closesocket(client);
+      return;
+    }
+    attributes = GetFileAttributesA(filePath);
   }
   if (attributes & FILE_ATTRIBUTE_DIRECTORY) {
     char directoryIndex[MAX_HOME_PAGE];
     snprintf(directoryIndex, sizeof(directoryIndex), "%s/index.html", requestPath);
     if (!build_safe_path(root, directoryIndex, filePath, sizeof(filePath)) ||
         GetFileAttributesA(filePath) == INVALID_FILE_ATTRIBUTES) {
-      send_response(client, 404, "Not Found", "text/plain; charset=utf-8", "Not found");
-      closesocket(client);
-      return;
+      if (!try_html_fallback_path(root, requestPath, filePath, sizeof(filePath))) {
+        send_response(client, 404, "Not Found", "text/plain; charset=utf-8", "Not found");
+        closesocket(client);
+        return;
+      }
     }
   }
 
@@ -533,6 +540,28 @@ static int build_safe_path(const char *root, const char *relative, char *outPath
   pathLength = GetFullPathNameA(combined, (DWORD)outPathSize, outPath, NULL);
   if (pathLength == 0 || pathLength >= outPathSize) return 0;
   return starts_with_path_case_insensitive(outPath, rootWithSlash) || _stricmp(outPath, rootFull) == 0;
+}
+
+static int try_html_fallback_path(const char *root, const char *requestPath, char *outPath, size_t outPathSize) {
+  char fallback[MAX_HOME_PAGE];
+  DWORD attributes;
+  size_t length = strlen(requestPath);
+
+  if (length == 0 || requestPath[length - 1] == '\\' || requestPath[length - 1] == '/' || request_path_has_extension(requestPath)) return 0;
+  if (length + 5 >= sizeof(fallback)) return 0;
+  snprintf(fallback, sizeof(fallback), "%s.html", requestPath);
+  if (!build_safe_path(root, fallback, outPath, outPathSize)) return 0;
+  attributes = GetFileAttributesA(outPath);
+  return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static int request_path_has_extension(const char *path) {
+  const char *slash = strrchr(path, '\\');
+  const char *forwardSlash = strrchr(path, '/');
+  const char *base;
+  if (!slash || (forwardSlash && forwardSlash > slash)) slash = forwardSlash;
+  base = slash ? slash + 1 : path;
+  return strchr(base, '.') != NULL;
 }
 
 static int starts_with_path_case_insensitive(const char *child, const char *parent) {

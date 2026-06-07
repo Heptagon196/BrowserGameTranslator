@@ -1,8 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { BrowserWindow } from "electron";
-import { WebGameDownloadEvent, WebGameDownloadInput, WebGameDownloadProgress, WebGameDownloadResult } from "../shared/types";
+import { ProjectConfig, WebGameAdditionalPageInput, WebGameDownloadEvent, WebGameDownloadInput, WebGameDownloadProgress, WebGameDownloadResult } from "../shared/types";
 import { networkFetch } from "./networkProxyService";
+import { projectDirs } from "./storage";
 
 const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
 const assetExtensions = /\.(png|jpg|jpeg|gif|svg|webp|avif|ico|mp3|ogg|wav|m4a|flac|mp4|webm|json|xml|atlas|fnt|wasm|css|js|mjs|glsl|vert|frag|bin|dat|tmx|tsx|woff|woff2|ttf|otf|eot)$/i;
@@ -27,6 +28,17 @@ interface WebAssetRecord {
   bytes?: number;
   contentType?: string;
   error?: string;
+}
+
+interface WebGameDownloadIndex {
+  schemaVersion: 1;
+  createdAt: string;
+  updatedAt?: string;
+  originalUrl: string;
+  entryUrl: string;
+  rootUrl: string;
+  additionalEntryUrls?: string[];
+  assets: WebAssetRecord[];
 }
 
 interface ItchRecord {
@@ -64,6 +76,15 @@ interface DownloadContext {
   onProgress?: (progress: WebGameDownloadProgress) => void;
 }
 
+interface WebGameDownloadOptions {
+  allowExistingOutput?: boolean;
+  forceEntryPath?: string;
+  rootUrlForResolved?: (resolved: ResolvedEntry) => string;
+  mergeIndex?: boolean;
+  writeMetadata?: boolean;
+  logLabel?: string;
+}
+
 export async function downloadWebGame(
   input: WebGameDownloadInput,
   handlers: {
@@ -71,20 +92,72 @@ export async function downloadWebGame(
     onProgress?: (progress: WebGameDownloadProgress) => void;
   }
 ): Promise<WebGameDownloadResult> {
+  return downloadWebGameInternal(input, handlers, {
+    forceEntryPath: normalizeEntryPathInput(input.entryPath),
+    writeMetadata: true,
+    logLabel: "下载网页游戏"
+  });
+}
+
+export async function downloadAdditionalWebPage(
+  project: ProjectConfig,
+  input: WebGameAdditionalPageInput,
+  handlers: {
+    onEvent: (event: WebGameDownloadEvent) => void;
+    onProgress?: (progress: WebGameDownloadProgress) => void;
+  }
+): Promise<WebGameDownloadResult> {
+  const dirs = projectDirs(project);
+  const indexPath = path.join(dirs.originalRoot, "web-game-download-index.json");
+  const existingIndex = await readDownloadIndex(indexPath);
+  return downloadWebGameInternal(
+    {
+      url: input.url,
+      outputDirectory: dirs.originalRoot,
+      runtimeCaptureSeconds: input.runtimeCaptureSeconds
+    },
+    handlers,
+    {
+      allowExistingOutput: true,
+      mergeIndex: true,
+      writeMetadata: false,
+      logLabel: "额外下载页面",
+      rootUrlForResolved: (resolved) => chooseAdditionalPageRootUrl(resolved.entryUrl, existingIndex)
+    }
+  );
+}
+
+async function downloadWebGameInternal(
+  input: WebGameDownloadInput,
+  handlers: {
+    onEvent: (event: WebGameDownloadEvent) => void;
+    onProgress?: (progress: WebGameDownloadProgress) => void;
+  },
+  options: WebGameDownloadOptions
+): Promise<WebGameDownloadResult> {
   const url = input.url.trim();
   const outputDirectory = input.outputDirectory.trim();
   if (!/^https?:\/\/[^/]+/i.test(url)) throw new Error("请输入有效的网页游戏地址。");
   if (!outputDirectory) throw new Error("请选择保存目录。");
 
   const emit = handlers.onEvent;
-  emit({ stream: "system", text: `下载网页游戏：${url}` });
+  emit({ stream: "system", text: `${options.logLabel ?? "下载网页游戏"}：${url}` });
   emit({ stream: "system", text: "使用通用网页下载器：递归解析静态资源，并捕获启动阶段的运行时请求。" });
 
   try {
     const gameDir = path.resolve(outputDirectory);
-    const outputErrors = await validateWebGameOutputDirectory(gameDir);
-    if (outputErrors.length) throw new Error(outputErrors.join("\n"));
-    const resolved = await resolveEntryPage(url, emit);
+    if (!options.allowExistingOutput) {
+      const outputErrors = await validateWebGameOutputDirectory(gameDir);
+      if (outputErrors.length) throw new Error(outputErrors.join("\n"));
+    } else {
+      await fs.mkdir(gameDir, { recursive: true });
+    }
+    const resolvedEntry = await resolveEntryPage(url, emit);
+    const resolved: ResolvedEntry = {
+      ...resolvedEntry,
+      rootUrl: options.rootUrlForResolved?.(resolvedEntry) ?? resolvedEntry.rootUrl
+    };
+    const entryPath = options.forceEntryPath ?? localEntryPathForUrl(new URL(resolved.entryUrl), resolved.rootUrl) ?? "index.html";
 
     const context: DownloadContext = {
       originalUrl: resolved.originalUrl,
@@ -101,7 +174,7 @@ export async function downloadWebGame(
       context.preloadedText.set(stripUrlHash(resolved.entryUrl), { text: resolved.pageHtml, contentType: "text/html" });
     }
 
-    addAsset(context, { url: resolved.entryUrl, required: true, source: "entry" }, "index.html");
+    addAsset(context, { url: resolved.entryUrl, required: true, source: "entry" }, entryPath);
     await processAssetQueue(context);
 
     const runtimeAssets = await captureRuntimeAssetRefs(resolved.entryUrl, context, emit, handlers.onProgress, normalizeRuntimeCaptureSeconds(input.runtimeCaptureSeconds));
@@ -115,24 +188,11 @@ export async function downloadWebGame(
     const requiredFailure = failures.some((asset) => asset.required);
     const totalBytes = downloaded.reduce((sum, asset) => sum + (asset.bytes ?? 0), 0);
 
-    const metadataPath = await writeOptionalMetadata(resolved.originalUrl, gameDir).catch(() => undefined);
+    const metadataPath = options.writeMetadata === false ? undefined : await writeOptionalMetadata(resolved.originalUrl, gameDir).catch(() => undefined);
     const indexPath = path.join(gameDir, "web-game-download-index.json");
-    await fs.writeFile(
-      indexPath,
-      `${JSON.stringify(
-        {
-          schemaVersion: 1,
-          createdAt: new Date().toISOString(),
-          originalUrl: resolved.originalUrl,
-          entryUrl: resolved.entryUrl,
-          rootUrl: resolved.rootUrl,
-          assets: Array.from(context.assets.values()).sort((a, b) => a.path.localeCompare(b.path))
-        },
-        null,
-        2
-      )}\n`,
-      "utf8"
-    );
+    const previousIndex = options.mergeIndex ? await readDownloadIndex(indexPath) : undefined;
+    const index = buildDownloadIndex(resolved, Array.from(context.assets.values()), previousIndex);
+    await fs.writeFile(indexPath, `${JSON.stringify(index, null, 2)}\n`, "utf8");
 
     const failureNote = failures.length
       ? ` (${failures.length} 个资源失败：${failures.slice(0, 3).map((asset) => `${asset.path} ${asset.error ?? ""}`.trim()).join("；")}${failures.length > 3 ? "..." : ""})`
@@ -140,7 +200,7 @@ export async function downloadWebGame(
     return {
       status: !requiredFailure,
       message: `网页游戏下载完成：${downloaded.length} 个资源${failureNote}。`,
-      filePath: path.join(gameDir, "index.html"),
+      filePath: path.join(gameDir, entryPath),
       metadataPath,
       indexPath,
       assets: downloaded.map((asset) => asset.path),
@@ -415,6 +475,75 @@ function normalizeResourceUrl(ref: string, baseUrl: string): string | undefined 
   } catch {
     return undefined;
   }
+}
+
+async function readDownloadIndex(indexPath: string): Promise<WebGameDownloadIndex | undefined> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(indexPath, "utf8")) as Partial<WebGameDownloadIndex>;
+    if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.assets)) return undefined;
+    return {
+      schemaVersion: 1,
+      createdAt: parsed.createdAt ?? new Date().toISOString(),
+      updatedAt: parsed.updatedAt,
+      originalUrl: parsed.originalUrl ?? "",
+      entryUrl: parsed.entryUrl ?? "",
+      rootUrl: parsed.rootUrl ?? "",
+      additionalEntryUrls: parsed.additionalEntryUrls,
+      assets: parsed.assets
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function buildDownloadIndex(resolved: ResolvedEntry, assets: WebAssetRecord[], previous?: WebGameDownloadIndex): WebGameDownloadIndex {
+  const now = new Date().toISOString();
+  const mergedAssets = new Map<string, WebAssetRecord>();
+  for (const asset of previous?.assets ?? []) mergedAssets.set(asset.url || asset.path, asset);
+  for (const asset of assets) mergedAssets.set(asset.url || asset.path, asset);
+
+  const additionalEntryUrls = new Set(previous?.additionalEntryUrls ?? []);
+  if (previous && resolved.entryUrl !== previous.entryUrl) additionalEntryUrls.add(resolved.entryUrl);
+
+  return {
+    schemaVersion: 1,
+    createdAt: previous?.createdAt ?? now,
+    updatedAt: previous ? now : undefined,
+    originalUrl: previous?.originalUrl || resolved.originalUrl,
+    entryUrl: previous?.entryUrl || resolved.entryUrl,
+    rootUrl: previous?.rootUrl || resolved.rootUrl,
+    ...(additionalEntryUrls.size ? { additionalEntryUrls: Array.from(additionalEntryUrls).sort() } : {}),
+    assets: Array.from(mergedAssets.values()).sort((a, b) => a.path.localeCompare(b.path))
+  };
+}
+
+function chooseAdditionalPageRootUrl(entryUrl: string, existingIndex?: WebGameDownloadIndex): string {
+  const entry = new URL(entryUrl);
+  const candidates = [existingIndex?.rootUrl, existingIndex?.entryUrl ? new URL(".", existingIndex.entryUrl).toString() : undefined].filter(Boolean) as string[];
+  for (const candidate of candidates) {
+    try {
+      const root = new URL(candidate);
+      if (root.origin === entry.origin && entry.pathname.startsWith(root.pathname)) return root.toString();
+    } catch {
+      // Ignore malformed historical index values.
+    }
+  }
+  return new URL("/", entry).toString();
+}
+
+function localEntryPathForUrl(url: URL, rootUrl: string): string | undefined {
+  const localPath = localPathForUrl(url, rootUrl);
+  if (!localPath) return "index.html";
+  if (!url.pathname.endsWith("/")) return localPath;
+  return `${localPath.replace(/\/+$/, "")}/index.html`;
+}
+
+function normalizeEntryPathInput(value: string | undefined): string {
+  const trimmed = value?.trim() || "index.html";
+  const normalized = sanitizeAssetPath(trimmed);
+  if (!normalized) throw new Error("主页路径无效，请填写项目内的相对文件路径。");
+  if (normalized.endsWith("/")) throw new Error("主页路径必须是文件，不能以 / 结尾。");
+  return normalized;
 }
 
 function localPathForUrl(url: URL, rootUrl: string): string | undefined {

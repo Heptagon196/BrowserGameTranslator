@@ -21,6 +21,12 @@ export interface AiBalanceSnapshot {
 export interface WebGameDownloadInput {
   url: string;
   outputDirectory: string;
+  entryPath?: string;
+  runtimeCaptureSeconds?: number;
+}
+
+export interface WebGameAdditionalPageInput {
+  url: string;
   runtimeCaptureSeconds?: number;
 }
 
