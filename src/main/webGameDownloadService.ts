@@ -246,7 +246,7 @@ function discoverNestedAssets(context: DownloadContext, asset: WebAssetRecord, t
     return;
   }
   if (isJsAsset(asset.path, contentType)) {
-    for (const ref of scanTextForAssetRefs(text, asset.url, "js")) addAsset(context, ref);
+    for (const ref of scanTextForAssetRefs(text, context.entryUrl, "js")) addAsset(context, ref);
     return;
   }
   for (const ref of scanTextForAssetRefs(text, asset.url, "manifest")) addAsset(context, ref);
@@ -318,11 +318,16 @@ function scanTextForAssetRefs(text: string, baseUrl: string, source: WebAssetSou
   const refs: WebAssetRef[] = [];
   for (const match of text.matchAll(/["'`]([^"'`<>]+?\.[a-zA-Z0-9]{1,12}(?:[?#][^"'`]*)?)["'`]/g)) {
     const candidate = match[1].trim();
+    if (hasTemplatePlaceholder(candidate)) continue;
     if (!assetExtensions.test(candidate.split(/[?#]/, 1)[0])) continue;
     const assetUrl = normalizeResourceUrl(candidate, baseUrl);
     if (assetUrl) refs.push({ url: assetUrl, required: false, source });
   }
   return refs;
+}
+
+function hasTemplatePlaceholder(value: string): boolean {
+  return /\$\{[^}]*\}/.test(value);
 }
 
 async function captureRuntimeAssetRefs(

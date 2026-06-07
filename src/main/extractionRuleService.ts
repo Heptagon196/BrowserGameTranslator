@@ -11,7 +11,8 @@ import {
   ExtractionRuleScanResult,
   ExtractionScanProgress,
   ExtractionRulesFile,
-  ProjectConfig
+  ProjectConfig,
+  TextItem
 } from "../shared/types";
 import { groupExtractionCandidates, materializeTextItemsFromRules, rulesFromIncludedGroups, scanExtractionCandidates, type ScriptDataBlockHint } from "./extractors";
 import { compactTextItems, projectDirs, projectPaths, readJson, readJsonl, writeJson, writeJsonl } from "./storage";
@@ -138,7 +139,8 @@ export async function materializeProjectTextItemsFromRules(project: ProjectConfi
   const candidates = await loadExtractionCandidates(project);
   const rulesFile = await loadConfirmedExtractionRules(project);
   if (options.requireIncluded !== false && !rulesFile.rules.length) throw new Error("还没有已纳入的提取规则组。");
-  const items = materializeTextItemsFromRules(candidates, rulesFile.rules);
+  const existingItems = await readJsonl<TextItem>(projectPaths(project).textItems);
+  const items = mergeMaterializedTextItems(materializeTextItemsFromRules(candidates, rulesFile.rules), existingItems);
   const report = await readJson<ExtractionRuleReport>(extractionRuleReportPath(project), {
     schemaVersion: 1,
     scannedAt: new Date().toISOString(),
@@ -161,6 +163,23 @@ export async function materializeProjectTextItemsFromRules(project: ProjectConfi
   });
   await writeJson(extractionRuleReportPath(project), nextReport);
   return { items, report: nextReport };
+}
+
+function mergeMaterializedTextItems(nextItems: TextItem[], existingItems: TextItem[]): TextItem[] {
+  const existingByStableKey = new Map(existingItems.map((item) => [textItemStableKey(item), item]));
+  return nextItems.map((item) => {
+    const existing = existingByStableKey.get(textItemStableKey(item));
+    if (!existing) return item;
+    return {
+      ...item,
+      translation: existing.translation ?? item.translation,
+      status: existing.status ?? item.status
+    };
+  });
+}
+
+function textItemStableKey(item: TextItem): string {
+  return `${item.sourceFile}\n${item.locator}\n${item.original}`;
 }
 
 export async function createProjectExtractionRulePackage(project: ProjectConfig, displayName?: string): Promise<ExtractionRulePackage> {

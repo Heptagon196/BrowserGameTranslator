@@ -31,8 +31,12 @@ const technicalJsValueKeys = new Set([
   "className",
   "color",
   "colour",
+  "d",
   "file",
   "files",
+  "fontFamily",
+  "fontSize",
+  "fontWeight",
   "format",
   "background_color",
   "background_colour",
@@ -72,6 +76,7 @@ const technicalStrings = new Set([
   "httpEquiv",
   "acceptCharset",
   "contentEditable",
+  "d",
   "spellCheck",
   "dangerouslySetInnerHTML",
   "defaultValue",
@@ -170,6 +175,12 @@ interface JsScanRange {
   innerStart: number;
   innerEnd: number;
   name?: string;
+}
+
+interface JsTemplateLiteral {
+  start: number;
+  end: number;
+  parts: Array<{ start: number; end: number; raw: string }>;
 }
 
 interface JsStringExtraction {
@@ -494,6 +505,7 @@ function shouldExtractString(value: string): boolean {
   if (/^(?:[a-z][a-zA-Z]*\s+){10,}[a-z][a-zA-Z]*$/.test(trimmed)) return false;
   if (/^[a-z]+:[a-z-]+$/.test(trimmed)) return false;
   if (looksLikeAttributeList(trimmed)) return false;
+  if (looksLikeSvgPathData(trimmed)) return false;
   return hasExtractableLetters(trimmed);
 }
 
@@ -514,6 +526,10 @@ function looksLikeAttributeList(value: string): boolean {
 
 function looksLikeHtmlTagName(value: string): boolean {
   return /^(?:a|abbr|address|article|aside|audio|b|blockquote|body|br|button|canvas|code|dd|div|dl|dt|em|fieldset|figcaption|figure|footer|form|h[1-6]|head|header|hr|html|i|iframe|img|input|label|legend|li|main|nav|ol|option|p|pre|script|section|select|small|span|strong|style|svg|table|tbody|td|textarea|th|thead|title|tr|ul|video)$/i.test(value.trim());
+}
+
+function looksLikeSvgPathData(value: string): boolean {
+  return /\d/.test(value) && /^[MmZzLlHhVvCcSsQqTtAaRr0-9,.\s+-]+$/.test(value.trim());
 }
 
 function looksLikeCssClassList(value: string): boolean {
@@ -744,6 +760,40 @@ function extractJsStrings(text: string, offset: number, onProgress?: (current: n
       continue;
     }
     if (char !== '"' && char !== "'" && char !== "`") continue;
+    if (char === "`") {
+      if (!canStartJsTemplateLiteral(text, index)) continue;
+      const parsedTemplate = readJsTemplateLiteral(text, index);
+      if (!parsedTemplate) continue;
+      index = parsedTemplate.end - 1;
+      const propertyKey = propertyKeyBeforeString(text, parsedTemplate.start);
+      if (isTechnicalJsValueKey(propertyKey)) continue;
+      const keyName = keyNameForJsValue(stack, propertyKey);
+      const keyPath = keyPathForJsValue(stack, propertyKey);
+      if (keyName && isTechnicalJsValueKey(keyName)) continue;
+      if (parsedTemplate.parts.length === 1) {
+        const rawValue = unescapeJs(parsedTemplate.parts[0].raw, "`");
+        const htmlTemplateParts = extractHtmlTemplateTextEntries(rawValue, offset + parsedTemplate.parts[0].start, keyName, keyPath);
+        if (htmlTemplateParts.length) {
+          items.push(...htmlTemplateParts);
+          continue;
+        }
+      }
+      for (const part of parsedTemplate.parts) {
+        const rawValue = unescapeJs(part.raw, "`");
+        const value = rawValue.trim();
+        if (!shouldExtractString(value)) continue;
+        const leading = leadingWhitespaceLength(rawValue);
+        const trailing = trailingWhitespaceLength(rawValue);
+        items.push({
+          range: { start: offset + part.start + leading, end: offset + part.end - trailing, kind: "js-template-content" },
+          value,
+          keyName,
+          keyPath,
+          sourceRole: sourceRoleForExtractedJsString(value, keyName, keyPath, astStrings.get(`${parsedTemplate.start}:${parsedTemplate.end}`)?.sourceRole)
+        });
+      }
+      continue;
+    }
     const parsed = readJsString(text, index, char);
     if (!parsed) continue;
     index = parsed.end - 1;
@@ -765,7 +815,6 @@ function extractJsStrings(text: string, offset: number, onProgress?: (current: n
       }
       continue;
     }
-    if (char === "`" && parsed.raw.includes("${")) continue;
     const propertyKey = propertyKeyBeforeString(text, parsed.start);
     if (isTechnicalJsValueKey(propertyKey)) continue;
     const value = rawValue.trim();
@@ -774,13 +823,6 @@ function extractJsStrings(text: string, offset: number, onProgress?: (current: n
     const keyName = keyNameForJsValue(stack, propertyKey);
     const keyPath = keyPathForJsValue(stack, propertyKey);
     if (keyName && isTechnicalJsValueKey(keyName)) continue;
-    if (char === "`" && !parsed.raw.includes("${")) {
-      const htmlTemplateParts = extractHtmlTemplateTextEntries(parsed.raw, offset + parsed.start + 1, keyName, keyPath);
-      if (htmlTemplateParts.length) {
-        items.push(...htmlTemplateParts);
-        continue;
-      }
-    }
     const prefixedValue = normalizePrefixedValueString(value);
     if (prefixedValue !== null) {
       if (!shouldExtractString(prefixedValue)) continue;
@@ -789,23 +831,11 @@ function extractJsStrings(text: string, offset: number, onProgress?: (current: n
         value: prefixedValue,
         keyName,
         keyPath,
-        sourceRole: astInfo?.sourceRole
+        sourceRole: sourceRoleForExtractedJsString(prefixedValue, keyName, keyPath, astInfo?.sourceRole)
       });
       continue;
     }
     if (!shouldExtractString(value)) continue;
-    if (char === "`" && /[\r\n]/.test(rawValue)) {
-      const leading = leadingWhitespaceLength(rawValue);
-      const trailing = trailingWhitespaceLength(rawValue);
-      items.push({
-        range: { start: offset + parsed.start + 1 + leading, end: offset + parsed.end - 1 - trailing, kind: "js-template-content" },
-        value,
-        keyName,
-        keyPath,
-        sourceRole: astInfo?.sourceRole
-      });
-      continue;
-    }
     const leading = leadingWhitespaceLength(rawValue);
     const trailing = trailingWhitespaceLength(rawValue);
     if (leading || trailing) continue;
@@ -814,11 +844,18 @@ function extractJsStrings(text: string, offset: number, onProgress?: (current: n
       value,
       keyName,
       keyPath,
-      sourceRole: astInfo?.sourceRole
+      sourceRole: sourceRoleForExtractedJsString(value, keyName, keyPath, astInfo?.sourceRole)
     });
   }
   onProgress?.(text.length, text.length);
   return items;
+}
+
+function sourceRoleForExtractedJsString(value: string, keyName?: string, keyPath?: string, astRole?: ExtractionSourceRole): ExtractionSourceRole | undefined {
+  const contextName = [keyPath, keyName].filter(Boolean).join(".");
+  if (contextName && isVisibleTextContext(contextName, "", undefined)) return visibleRoleForContext(contextName, "");
+  if ((astRole === undefined || astRole === "unknown_js_value" || astRole === "engine_runtime") && looksLikeNaturalLanguageContent(value)) return "visible_text_value";
+  return astRole;
 }
 
 function extractHtmlTemplateTextEntries(raw: string, absoluteContentStart: number, keyName?: string, keyPath?: string): JsStringExtraction[] {
@@ -912,7 +949,7 @@ function classifyJsStringLiteral(value: string, node: any, parent: any, key?: st
   const trimmed = value.trim();
   const propertyName = parent?.type === "Property" && parent.value === node ? propertyNameFromAst(parent.key) : "";
   const assignmentName = parent?.type === "AssignmentExpression" && parent.right === node ? memberNameFromAst(parent.left) : "";
-  const callName = parent?.type === "CallExpression" ? calleeName(parent.callee) : "";
+  const callName = parent?.type === "CallExpression" || parent?.type === "NewExpression" ? calleeName(parent.callee) : "";
   const valueKey = propertyName || assignmentName;
 
   if (looksLikeMimeOrCodec(trimmed) || /(?:^|[._])(?:_?setupCodecs|codecs?)(?:$|[._])/.test(valueKey)) return "mime_or_codec";
@@ -978,13 +1015,15 @@ function isEngineRuntimeContext(propertyName: string, callName: string, key?: st
     || /(?:^|\.)(?:rel|tagName|nodeName|type|crossOrigin|credentials|integrity|referrerPolicy|lang|locale|format|mode|state|key|keyCode)$/.test(propertyName)
     || /(?:^|[._-])type$/.test(propertyName)
     || /(?:createElement|setAttribute|removeAttribute|supports|split|join|replace|match|test|open|send)$/i.test(callName)
+    || /(?:^|\.)(?:console\.(?:log|warn|error|debug|info|group|groupEnd|table)|Error|RegExp)$/.test(callName)
     || key === "arguments";
 }
 
 function isVisibleTextContext(propertyName: string, callName: string, index?: number): boolean {
-  const lower = propertyName.toLowerCase();
+  const lower = normalizeJsContextName(propertyName);
   if (/(?:^|[._-])(?:colou?r|text_colou?r|background_colou?r|font|fontsize|size|x|y|left|top|right|bottom|width|height|position|scale|rotation|opacity)(?:$|[._-])/.test(lower)) return false;
-  if (/(?:^|[._-])(text|textcontent|innertext|message|dialogue|dialog|title|name|description|desc|content|label|choice|question|answer|body|line|caption|speaker|civil_status|children)(?:$|[._-])/.test(lower)) return true;
+  if (/(?:^|[._\-[\]])save[._-]status(?:$|[._\-[\]])/.test(lower)) return true;
+  if (/(?:^|[._\-[\]])(?:texts?|textcontent|innertext|messages?|dialogues?|dialogs?|titles?|headings?|names?|displaynames?|descriptions?|desc|contents?|labels?|choices?|questions?|answers?|replies|reply|body|bodies|lines?|captions?|speakers?|alt|aria|placeholder|tooltip|civil_status|children)(?:$|[._\-[\]])/.test(lower)) return true;
   if (/(?:^|\.)(?:alert|confirm|prompt|showMessage|showText|setText|createTextNode)$/.test(callName)) return index === 0 || index === undefined;
   return false;
 }
@@ -998,6 +1037,7 @@ function looksLikeNaturalLanguageContent(value: string): boolean {
   if (/^[A-Za-z_$][A-Za-z0-9_$-]*$/.test(text)) return false;
   if (/^[-A-Z0-9_./]+$/.test(text) && !/\s/.test(text)) return false;
   const words = text.match(/[\p{L}\p{N}']+/gu) ?? [];
+  if (/[.!?。！？:;，,]/.test(text) && text.length >= 8) return true;
   if (words.length < 2) return false;
   if (text.startsWith("@") && words.length >= 3) return true;
   if (/[\r\n]/.test(text) && words.length >= 3) return true;
@@ -1008,10 +1048,87 @@ function looksLikeNaturalLanguageContent(value: string): boolean {
 }
 
 function visibleRoleForContext(propertyName: string, callName: string): ExtractionSourceRole {
-  const lower = `${propertyName}.${callName}`.toLowerCase();
+  const lower = normalizeJsContextName(`${propertyName}.${callName}`);
   if (/(dialogue|dialog|message|text|content|body|line|speaker|civil_status)/.test(lower)) return "dialogue_field";
   if (/(title|alt|placeholder|aria|label|caption|children|name|description|desc)/.test(lower)) return "ui_attribute";
   return "visible_text_value";
+}
+
+function normalizeJsContextName(value: string): string {
+  return value.replace(/([a-z0-9])([A-Z])/g, "$1.$2").toLowerCase();
+}
+
+function canStartJsTemplateLiteral(text: string, start: number): boolean {
+  const previous = previousSignificantIndex(text, start - 1);
+  if (previous < 0) return true;
+  const char = text[previous];
+  if (/[[({,;:=?!&|+\-*/~^%<>]/.test(char)) return true;
+  const prefix = text.slice(Math.max(0, previous - 16), previous + 1);
+  return /\b(?:return|throw|yield|case|delete|void|typeof|new|in|of|await)$/.test(prefix);
+}
+
+function readJsTemplateLiteral(text: string, start: number): JsTemplateLiteral | null {
+  let index = start + 1;
+  let partStart = index;
+  const parts: JsTemplateLiteral["parts"] = [];
+  while (index < text.length) {
+    const char = text[index];
+    if (char === "\\") {
+      index += 2;
+      continue;
+    }
+    if (char === "`") {
+      if (partStart < index) parts.push({ start: partStart, end: index, raw: text.slice(partStart, index) });
+      return { start, end: index + 1, parts };
+    }
+    if (char === "$" && text[index + 1] === "{") {
+      if (partStart < index) parts.push({ start: partStart, end: index, raw: text.slice(partStart, index) });
+      const expressionEnd = findTemplateExpressionEnd(text, index + 2);
+      if (expressionEnd < 0) return null;
+      index = expressionEnd + 1;
+      partStart = index;
+      continue;
+    }
+    index += 1;
+  }
+  return null;
+}
+
+function findTemplateExpressionEnd(text: string, start: number): number {
+  let depth = 1;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+    if (char === "/" && next === "/") {
+      index = skipLineComment(text, index + 2);
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      index = skipBlockComment(text, index + 2);
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      const parsed = readJsString(text, index, char);
+      if (!parsed) return -1;
+      index = parsed.end - 1;
+      continue;
+    }
+    if (char === "`") {
+      const parsed = readJsTemplateLiteral(text, index);
+      if (!parsed) return -1;
+      index = parsed.end - 1;
+      continue;
+    }
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
 }
 
 function readJsString(text: string, start: number, quote: string): { start: number; end: number; raw: string } | null {
